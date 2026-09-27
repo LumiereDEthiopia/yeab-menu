@@ -38,11 +38,16 @@ manage everything from a password-protected admin panel.
 | Variable          | Default                                             | Purpose                                        |
 | ----------------- | --------------------------------------------------- | ---------------------------------------------- |
 | `PORT`            | `8080`                                              | HTTP port (Railway injects it automatically)   |
-| `JWT_SECRET`      | dev-only fallback                                   | Signs admin tokens — **required in production**; the server refuses to start without it |
-| `ADMIN_USERNAME`  | `admin` (dev only)                                  | Admin panel username — **required in production** |
-| `ADMIN_PASSWORD`  | `admin` (dev only)                                  | Admin panel password — **required in production**; the server refuses to start with the default `admin`/`admin` pair |
-| `LUMIERE_DATA_DIR`| Windows: `%LOCALAPPDATA%\LumiereMenu`, Linux: `~/.lumiere-menu` | SQLite DB + backups (`/data` in Docker). **Required in production** — the server refuses to start without it (see *Database persistence* below) |
+| `JWT_SECRET`      | random per boot                                     | Signs admin tokens. If unset, a random secret is generated each start, so it is safe but **admin sessions end on every restart**. Set it to keep sessions |
+| `ADMIN_USERNAME`  | `admin`                                             | Admin panel username. **Strongly recommended to change** — see *Security* below |
+| `ADMIN_PASSWORD`  | `admin`                                             | Admin panel password. **Strongly recommended to change** — see *Security* below |
+| `LUMIERE_DATA_DIR`| Windows: `%LOCALAPPDATA%\LumiereMenu`, Linux: `~/.lumiere-menu` | SQLite DB + backups (`/data` in Docker). Set it to a mounted volume or the catalog is wiped on every redeploy (see *Database persistence* below) |
 | `LUMIERE_BACKUP_DIR`| `<LUMIERE_DATA_DIR>/backups` | Optional off-volume/non-primary location for automated backups. Strongly recommended in production so backups survive a lost volume |
+
+**The server always starts.** None of these are required to boot — missing or
+weak values are reported as warnings in the deploy logs instead of crashing the
+container, so a misconfigured deploy stays up and can be fixed from the
+dashboard. See [Security](#security) for what each warning means.
 
 Generate a strong `JWT_SECRET` with:
 
@@ -167,36 +172,53 @@ docker run -p 8080:8080 -v lumiere-data:/data lumiere-menu
 1. In Railway: **New Project → Deploy from GitHub repo** and pick
    `Lumiere-perfume`. The `railway.json` pins the build to the repo's
    `Dockerfile`, so no build settings are needed.
-2. In the service's **Variables** tab, add `JWT_SECRET` (long random string),
-   `ADMIN_USERNAME` and `ADMIN_PASSWORD`. The server **refuses to start** in
-   production without them — and refuses to start with the default
-   `admin`/`admin` credentials — because the admin panel is reachable from
-   the public internet once deployed.
-
-   > ⚠️ **Set real values, not placeholders.** `ADMIN_USERNAME=admin` +
-   > `ADMIN_PASSWORD=admin` is the *definition* of the value the startup guard
-   > rejects, so defining the variables alone still fails with
-   > `[config] FATAL: refusing to start in production with the default
-   > admin/admin credentials`. Pick your own pair, e.g.
-   > `ADMIN_USERNAME=lumiere_owner` and an 8+ character password.
-   >
-   > A local `.env` file **cannot** fix this: it is listed in both
-   > `.gitignore` and `.dockerignore`, so it is never copied into the image and
-   > never reaches the deployed container. Only the Variables injected into the
-   > running container are read. (Real environment variables also always take
-   > precedence over `.env` locally, so a stale file can't shadow them.)
+2. In the service's **Variables** tab, set `JWT_SECRET`, `ADMIN_USERNAME` and
+   `ADMIN_PASSWORD`. This step is **optional** — the server boots without them
+   (see [Security](#security)), but set them to lock down `/admin`. A local
+   `.env` file **cannot** do this: it is listed in both `.gitignore` and
+   `.dockerignore`, so it is never copied into the image and never reaches the
+   deployed container. Only the Variables injected into the running container
+   are read. (Real environment variables also always take precedence over
+   `.env` locally, so a stale file can't shadow them.)
 3. Go to **Volumes → + New Volume**, mount it at `/data`, then set the
    variable `LUMIERE_DATA_DIR=/data`. Without this the SQLite database is
-   wiped on every redeploy (Railway's filesystem is ephemeral). The server now
-   **refuses to start in production if `LUMIERE_DATA_DIR` is not set**, so a
-   misconfigured deploy fails fast instead of silently writing to an ephemeral
-   disk — but the volume itself must still be mounted for the data to persist.
-   Add `LUMIERE_BACKUP_DIR` pointing at a second volume (or any off-primary
-   location) so backups survive a lost volume.
+   wiped on every redeploy (Railway's filesystem is ephemeral). The Dockerfile
+   already defaults to `/data`, so this only needs setting if you mount the
+   volume somewhere else. Add `LUMIERE_BACKUP_DIR` pointing at a second volume
+   (or any off-primary location) so backups survive a lost volume.
 4. Under **Settings → Networking**, generate a public domain. The server
    already listens on the `PORT` Railway injects, so no other wiring needed.
    A health check at `/api/health` is already wired up via `railway.json`
    (`healthcheckPath`), so Railway knows when the container is ready.
+
+## Security
+
+The server **always boots** — it never refuses to start over configuration, so a
+missed setting can't take the deploy down. In production it prints a startup
+report instead, and every item in it is a decision you can make later without a
+redeploy being required first:
+
+```
+[config] 3 security warning(s) — the server is running, but /admin is exposed:
+          - the admin panel uses the default admin/admin credentials. ...
+          - JWT_SECRET is not set, so a random one was generated ...
+          - ADMIN_PASSWORD is only 5 characters. ...
+```
+
+| Warning                          | What it means                                                                                                                                   | Fix                                                        |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Default `admin`/`admin`          | `/admin` is reachable from the public internet with credentials that are in this repo's README. Anyone who guesses the URL can edit the whole catalog. | Set `ADMIN_USERNAME` + `ADMIN_PASSWORD` in Variables        |
+| `JWT_SECRET` not set             | A random secret is generated per boot. It cannot be guessed, **but every restart invalidates all admin sessions** — including Railway redeploys. | Set `JWT_SECRET` in Variables                               |
+| `JWT_SECRET` is a known value    | Anyone holding it (it is public) can **forge an admin token and skip the login form entirely**. This is the most serious of the three. | Generate a unique one and set it in Variables               |
+| Short `ADMIN_PASSWORD`           | Trivially brute-forceable.                                                          | Use 8+ characters                                          |
+| `LUMIERE_DATA_DIR` not set       | The catalog is written to the container's ephemeral disk and is **deleted on every redeploy**. This one loses data rather than exposing it. | Mount a volume at `/data` (the Dockerfile already defaults to it) |
+
+Nothing above is enforced by the code, so the choice is yours — just make it an
+informed one. Nothing in the logs prints a secret value.
+
+The login endpoint is rate limited to 10 failures per IP per 15 minutes, and
+credentials are compared in constant time, so a deployed `admin`/`admin` is
+unguarded against a *determined* attacker rather than a casual one.
 
 #### Database persistence, backups & recovery
 

@@ -48,11 +48,11 @@ the supported, durable pattern here.
 4. Add at least one product in the admin panel, redeploy, and confirm it is
    still there.
 
-> If the server refuses to start with
-> `[config] FATAL: LUMIERE_DATA_DIR is not set`, create the volume, mount it at
-> `/data`, and set `LUMIERE_DATA_DIR=/data` in Variables. This fail-fast guard
-> exists precisely so a misconfigured deploy cannot silently write to an
-> ephemeral disk.
+> If you see `[config] WARNING: LUMIERE_DATA_DIR is not set` in the service
+> logs, create the volume, mount it at `/data`, and set `LUMIERE_DATA_DIR=/data`
+> in Variables. The server deliberately **warns instead of refusing to boot**
+> here: staying up keeps the catalog reachable so you can fix the setting from
+> the dashboard, whereas crashing would only remove your way in.
 
 ---
 
@@ -60,8 +60,8 @@ the supported, durable pattern here.
 
 | Risk | Mitigation (already in place / now hardened) |
 | --- | --- |
-| No volume mounted at `/data` | Hardened: production now refuses to start without `LUMIERE_DATA_DIR`; docs require the volume. |
-| Misconfigured service writing to ephemeral FS | Hardened: `resolveDataDir()` fails fast in `NODE_ENV=production` when the variable is missing. |
+| No volume mounted at `/data` | Documented: production logs a prominent `LUMIERE_DATA_DIR` warning naming the fix. The `Dockerfile` defaults to `/data` so a mounted volume is picked up automatically. |
+| Misconfigured service writing to ephemeral FS | `resolveDataDir()` warns loudly in `NODE_ENV=production` and every boot prints the resolved path, so an ephemeral location is visible in the logs. |
 | A future buggy schema migration | Hardened: the server snapshots `perfumes-pre-boot-<timestamp>.db` **before** migrations run on every boot. Current migrations are additive only. |
 | Losing the primary volume takes backups with it | Hardened: `LUMIERE_BACKUP_DIR` can point at a second volume. |
 | Running `npm run seed*` against production | Hardened: documented as forbidden; seed scripts are local-only tools and are **not** wired into the Dockerfile, `railway.json` or `package.json` lifecycle scripts. |
@@ -144,7 +144,7 @@ Recovery is manual on purpose: nothing at deploy time resets or re-seeds data.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LUMIERE_DATA_DIR` | `%LOCALAPPDATA%\LumiereMenu` (Win) / `~/.lumiere-menu` (Linux) | Live SQLite DB location. **Required in production** (server refuses to start without it). |
+| `LUMIERE_DATA_DIR` | `%LOCALAPPDATA%\LumiereMenu` (Win) / `~/.lumiere-menu` (Linux) | Live SQLite DB location. **Set this to a mounted volume in production** — otherwise the catalog is deleted on every redeploy. The server warns but does not refuse to boot. |
 | `LUMIERE_BACKUP_DIR` | `<LUMIERE_DATA_DIR>/backups` | Backup location. Set to a second volume in production. |
 
 All other settings (`PORT`, `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`)

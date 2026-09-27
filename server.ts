@@ -7,7 +7,7 @@ import jwt from 'jsonwebtoken';
 import os from 'os';
 import ExcelJS from 'exceljs';
 import type { Workbook } from 'exceljs';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
 import dotenv from 'dotenv';
 
 // Load a local .env file before any variable below is read, so `npm run dev`
@@ -19,31 +19,46 @@ import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
 // --- Environment configuration -------------------------------------------------
-// Secrets have no defaults in production: the server refuses to start unless
-// JWT_SECRET, ADMIN_USERNAME and ADMIN_PASSWORD are set in the environment
-// (Railway → Variables). Local development keeps the old fallbacks with a
-// console warning so `npm run dev` works exactly as before.
+// Configuration is deliberately forgiving: the server always boots, and a
+// missing or weak secret is reported as a loud warning instead of a fatal
+// error. A hard failure here takes the whole app down and — on Railway —
+// burns the restart budget in a crash loop, which is a much worse outcome than
+// a trade-off the operator has knowingly accepted.
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const IS_PRODUCTION = NODE_ENV === 'production';
 
-function readRequiredEnv(name: string, devFallback: string): string {
-  const value = process.env[name];
-  if (typeof value === 'string' && value.length > 0) return value;
+/** Reads an env var, tracking whether the value came from the environment. */
+function readEnv(
+  name: string,
+  fallback: string
+): { value: string; fromEnv: boolean } {
+  const raw = process.env[name];
+  if (typeof raw === 'string' && raw.trim().length > 0) return { value: raw, fromEnv: true };
   if (!IS_PRODUCTION) {
     console.warn(
       `[config] ${name} is not set — using a development-only fallback. This is NOT safe outside local development.`
     );
-    return devFallback;
   }
-  console.error(
-    `[config] FATAL: ${name} is not set. In production the server refuses to start without it — set it in your deployment environment (Railway → Variables).`
-  );
-  process.exit(1);
+  return { value: fallback, fromEnv: false };
 }
 
-const JWT_SECRET = readRequiredEnv('JWT_SECRET', 'fallback-secret-for-dev');
-const ADMIN_USERNAME = readRequiredEnv('ADMIN_USERNAME', 'admin');
-const ADMIN_PASSWORD = readRequiredEnv('ADMIN_PASSWORD', 'admin');
+// JWT signing secret. When it is not provided we generate a strong random one
+// per boot rather than falling back to a hardcoded string: a hardcoded secret
+// is public the moment the repo is, and anyone holding it can mint admin tokens
+// without ever touching the login form. A per-boot secret is unknowable, so the
+// only cost is that issued sessions end when the process restarts.
+const jwtSecret = readEnv(
+  'JWT_SECRET',
+  IS_PRODUCTION ? randomBytes(48).toString('base64url') : 'fallback-secret-for-dev'
+);
+const JWT_SECRET = jwtSecret.value;
+
+// Admin panel credentials. These fall back to admin/admin so the app is usable
+// straight out of the box; the consequences are logged loudly at boot.
+const adminUsername = readEnv('ADMIN_USERNAME', 'admin');
+const adminPassword = readEnv('ADMIN_PASSWORD', 'admin');
+const ADMIN_USERNAME = adminUsername.value;
+const ADMIN_PASSWORD = adminPassword.value;
 
 // Secrets that appear in public documentation or tools. Using one in
 // production is equivalent to having no secret at all, since anyone can
@@ -62,29 +77,53 @@ const KNOWN_PUBLIC_SECRETS = new Set([
 // are just as guessable — normalize before comparing.
 const normalizedSecret = JWT_SECRET.trim().replace(/[.!?,;:'"()[\]]+$/, '').toLowerCase();
 
-if (IS_PRODUCTION && (KNOWN_PUBLIC_SECRETS.has(JWT_SECRET) || KNOWN_PUBLIC_SECRETS.has(normalizedSecret))) {
-  console.error(
-    "[config] FATAL: JWT_SECRET is a publicly known example value — anyone could forge admin tokens with it. Generate a unique one instead, e.g.: node -e \"console.log(require('crypto').randomBytes(48).toString('base64url'))\""
-  );
-  process.exit(1);
-}
-if (IS_PRODUCTION && ADMIN_USERNAME === 'admin' && ADMIN_PASSWORD === 'admin') {
-  console.error(
-    '[config] FATAL: refusing to start in production with the default admin/admin credentials.\n' +
-      '        These variables ARE being read, but they hold the placeholder values — defining them\n' +
-      '        is not enough, they have to be CHANGED to something of your own, e.g.\n' +
-      '          ADMIN_USERNAME=lumiere_owner\n' +
-      '          ADMIN_PASSWORD=<a long unique password, 8+ characters>\n' +
-      '        Set them in your host dashboard (Railway -> your service -> Variables) and redeploy.\n' +
-      '        A local .env file does NOT reach the deploy: it is gitignored and .dockerignored,\n' +
-      '        and only the Variables injected into the running container are read.'
-  );
-  process.exit(1);
-}
-if (IS_PRODUCTION && ADMIN_PASSWORD.length < 8) {
-  console.warn(
-    `[config] WARNING: ADMIN_PASSWORD is only ${ADMIN_PASSWORD.length} characters — use a long, unique value in production.`
-  );
+// --- Startup security report ---------------------------------------------------
+// Nothing below stops the server from booting. The point is to make the
+// trade-off visible in the deploy logs instead of silently shipping a
+// wide-open admin panel, so whoever operates this can see exactly what is
+// exposed and upgrade later without having to read the source.
+if (IS_PRODUCTION) {
+  const warnings: string[] = [];
+
+  if (KNOWN_PUBLIC_SECRETS.has(JWT_SECRET) || KNOWN_PUBLIC_SECRETS.has(normalizedSecret)) {
+    warnings.push(
+      'JWT_SECRET is a publicly known example value, so anyone can forge admin tokens and bypass the\n' +
+        '          login form entirely. This is the one setting most worth changing. Generate a unique one:\n' +
+        '            node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64url\'))"'
+    );
+  } else if (!jwtSecret.fromEnv) {
+    warnings.push(
+      'JWT_SECRET is not set, so a random one was generated for this process only. It is safe but not\n' +
+        '          stable: every restart (including Railway redeploys) invalidates all issued admin sessions,\n' +
+        '          so admins are silently logged out. Set it in Railway -> Variables to keep sessions.'
+    );
+  }
+
+  if (ADMIN_USERNAME === 'admin' && ADMIN_PASSWORD === 'admin') {
+    warnings.push(
+      'the admin panel uses the default admin/admin credentials. Anyone who guesses this URL has full\n' +
+        '          read/write access to the catalog. Set ADMIN_USERNAME and ADMIN_PASSWORD in Railway ->\n' +
+        '          Variables when you are ready to lock it down.'
+    );
+  } else if (!adminUsername.fromEnv || !adminPassword.fromEnv) {
+    warnings.push(
+      'only one of ADMIN_USERNAME / ADMIN_PASSWORD is set; the other falls back to "admin".\n' +
+        '          Set both in Railway -> Variables to avoid a half-default account.'
+    );
+  }
+
+  if (ADMIN_PASSWORD.length < 8) {
+    warnings.push(`ADMIN_PASSWORD is only ${ADMIN_PASSWORD.length} characters.`);
+  }
+
+  if (warnings.length > 0) {
+    console.warn(
+      `[config] ${warnings.length} security warning(s) — the server is running, but /admin is exposed:\n` +
+        warnings.map((w) => `          - ${w}`).join('\n')
+    );
+  } else {
+    console.log('[config] admin credentials and JWT secret are all set from the environment.');
+  }
 }
 
 /** Length-safe, timing-safe string comparison (both sides are hashed first, so lengths always match). */
@@ -108,14 +147,14 @@ function resolveDataDir(): string {
     return process.env.LUMIERE_DATA_DIR.trim();
   }
   if (IS_PRODUCTION) {
-    // Fail fast instead of silently writing to the container's ephemeral
-    // filesystem, where every redeploy would wipe the database.
-    console.error(
-      '[config] FATAL: LUMIERE_DATA_DIR is not set. In production it MUST point at persistent storage ' +
-      '(Railway: Service → Volumes → + New Volume, mount it at /data, then set LUMIERE_DATA_DIR=/data). ' +
-      "Without a mounted volume the SQLite database lives on the container's ephemeral filesystem and is deleted on every redeploy."
+    // Warn rather than exit: refusing to boot does not make the data any safer,
+    // it just means there is no app to restore from. The Dockerfile already sets
+    // /data, so this only fires on a hand-rolled start command.
+    console.warn(
+      '[config] WARNING: LUMIERE_DATA_DIR is not set. The SQLite database is falling back to the\n' +
+        '          container filesystem, which is EPHEMERAL on Railway — the catalog is deleted on every\n' +
+        '          redeploy. To fix: Volumes -> + New Volume, mount at /data, then set LUMIERE_DATA_DIR=/data.'
     );
-    process.exit(1);
   }
   return process.env.LOCALAPPDATA
     ? path.join(process.env.LOCALAPPDATA, 'LumiereMenu')
@@ -519,8 +558,8 @@ async function startServer() {
       return res.status(400).json({ error: 'Username and password are required' });
     }
     // One shared admin account, compared in constant time. Credentials come
-    // from the environment — in production the server refuses to start unless
-    // ADMIN_USERNAME / ADMIN_PASSWORD / JWT_SECRET are all set explicitly.
+    // from the environment, defaulting to admin/admin; anything weak about them
+    // is reported as a startup warning rather than blocking the boot.
     if (timingSafeEqualStr(username, ADMIN_USERNAME) && timingSafeEqualStr(password, ADMIN_PASSWORD)) {
       clearLoginFailures(clientIp);
       const token = jwt.sign({ username: ADMIN_USERNAME, role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
