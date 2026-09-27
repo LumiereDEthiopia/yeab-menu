@@ -1,0 +1,6 @@
+# Normalize line endings so Linux builders (Docker/Railway) never see CRLF
+# artifacts in files they parse (a CRLF before a backslash continuation in a
+# Dockerfile breaks some BuildKit versions).
+* text=auto
+Dockerfile eol=lf
+*.sh text eol=lf

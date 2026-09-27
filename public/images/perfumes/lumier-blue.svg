@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 450 556" width="450" height="556" role="img" aria-label="Lumier Perfume male bottle - blue">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbfbfc"/>
+      <stop offset="1" stop-color="#e2e4e6"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3d3d3f"/>
+      <stop offset="0.3" stop-color="#131315"/>
+      <stop offset="0.75" stop-color="#050506"/>
+      <stop offset="1" stop-color="#2a2a2c"/>
+    </linearGradient>
+    <linearGradient id="liq" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d3eaf8"/>
+      <stop offset="0.55" stop-color="#b3d7ef"/>
+      <stop offset="1" stop-color="#93c2e4"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="0.1" stop-color="#ffffff" stop-opacity="0.2"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="0.9" stop-color="#ffffff" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+  <rect width="450" height="556" fill="url(#bg)"/>
+  <ellipse cx="225" cy="531" rx="152" ry="11" fill="#000000" opacity="0.08"/>
+  <rect x="152" y="18" width="146" height="104" rx="10" fill="url(#cap)"/>
+  <rect x="161" y="25" width="9" height="90" rx="4.5" fill="#ffffff" opacity="0.14"/>
+  <path d="M112 130 L338 130 Q366 139 366 172 L366 466 Q366 505 327 515 L123 515 Q84 505 84 466 L84 172 Q84 139 112 130 Z" fill="#eef6fb"/>
+  <path d="M103 149 L347 149 L347 466 Q347 497 317 506 L133 506 Q103 497 103 466 Z" fill="url(#liq)"/>
+  <ellipse cx="225" cy="150" rx="122" ry="8" fill="#e2f2fb" opacity="0.95"/>
+  <path d="M103 149 Q225 161 347 149 L347 156 Q225 168 103 156 Z" fill="#8fbdd9" opacity="0.5"/>
+  <path d="M103 470 L347 470 L347 466 Q347 497 317 506 L133 506 Q103 497 103 470 Z" fill="#ffffff" opacity="0.5"/>
+  <path d="M112 130 L338 130 Q366 139 366 172 L366 466 Q366 505 327 515 L123 515 Q84 505 84 466 L84 172 Q84 139 112 130 Z" fill="url(#glass)"/>
+  <path d="M112 130 L338 130 Q366 139 366 172 L366 466 Q366 505 327 515 L123 515 Q84 505 84 466 L84 172 Q84 139 112 130 Z" fill="none" stroke="#98a2aa" stroke-width="2.5" opacity="0.6"/>
+  <rect x="94" y="152" width="12" height="330" rx="6" fill="#ffffff" opacity="0.55"/>
+  <rect x="345" y="152" width="9" height="330" rx="4.5" fill="#ffffff" opacity="0.3"/>
+  <rect x="220" y="118" width="8" height="352" rx="4" fill="#5aa9dd" opacity="0.85"/>
+  <rect x="222" y="118" width="3" height="352" rx="1.5" fill="#ffffff" opacity="0.7"/>
+  <text x="225" y="306" font-family="Georgia, 'Times New Roman', serif" font-size="94" font-weight="bold" fill="#101012" text-anchor="middle" letter-spacing="-7">LP</text>
+  <text x="228" y="370" font-family="Georgia, 'Times New Roman', serif" font-size="33" fill="#101012" text-anchor="middle" letter-spacing="7">LUMIER</text>
+  <rect x="221.5" y="381" width="7" height="7" transform="rotate(45 225 384.5)" fill="#101012"/>
+  <text x="229" y="414" font-family="Georgia, 'Times New Roman', serif" font-size="18" fill="#101012" text-anchor="middle" letter-spacing="8">PERFUME</text>
+</svg>

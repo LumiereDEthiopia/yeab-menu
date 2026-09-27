@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+coverage/
+
+# environment / secrets
+.env
+.env.*
+!.env.example
+
+# local databases & backups (live in %LOCALAPPDATA%\LumiereMenu)
+*.db
+backups/
+
+# logs
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+
+# vendored tooling that must never be committed
+PortableGit/
+PortableGit-*.exe
+*.7z
+
