@@ -172,6 +172,19 @@ docker run -p 8080:8080 -v lumiere-data:/data lumiere-menu
    production without them — and refuses to start with the default
    `admin`/`admin` credentials — because the admin panel is reachable from
    the public internet once deployed.
+
+   > ⚠️ **Set real values, not placeholders.** `ADMIN_USERNAME=admin` +
+   > `ADMIN_PASSWORD=admin` is the *definition* of the value the startup guard
+   > rejects, so defining the variables alone still fails with
+   > `[config] FATAL: refusing to start in production with the default
+   > admin/admin credentials`. Pick your own pair, e.g.
+   > `ADMIN_USERNAME=lumiere_owner` and an 8+ character password.
+   >
+   > A local `.env` file **cannot** fix this: it is listed in both
+   > `.gitignore` and `.dockerignore`, so it is never copied into the image and
+   > never reaches the deployed container. Only the Variables injected into the
+   > running container are read. (Real environment variables also always take
+   > precedence over `.env` locally, so a stale file can't shadow them.)
 3. Go to **Volumes → + New Volume**, mount it at `/data`, then set the
    variable `LUMIERE_DATA_DIR=/data`. Without this the SQLite database is
    wiped on every redeploy (Railway's filesystem is ephemeral). The server now

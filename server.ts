@@ -8,6 +8,15 @@ import os from 'os';
 import ExcelJS from 'exceljs';
 import type { Workbook } from 'exceljs';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import dotenv from 'dotenv';
+
+// Load a local .env file before any variable below is read, so `npm run dev`
+// and `npm start` honour it. `override` stays false on purpose: real
+// environment variables (Railway Variables, `docker run -e`, CI secrets)
+// always win over the file, so a checked-out .env can never shadow them.
+// Deployments have no .env to load — it is gitignored and .dockerignored —
+// so production must receive these values from the platform's dashboard.
+dotenv.config({ quiet: true });
 
 // --- Environment configuration -------------------------------------------------
 // Secrets have no defaults in production: the server refuses to start unless
@@ -60,11 +69,22 @@ if (IS_PRODUCTION && (KNOWN_PUBLIC_SECRETS.has(JWT_SECRET) || KNOWN_PUBLIC_SECRE
   process.exit(1);
 }
 if (IS_PRODUCTION && ADMIN_USERNAME === 'admin' && ADMIN_PASSWORD === 'admin') {
-  console.error('[config] FATAL: refusing to start in production with the default admin/admin credentials. Set ADMIN_USERNAME and ADMIN_PASSWORD.');
+  console.error(
+    '[config] FATAL: refusing to start in production with the default admin/admin credentials.\n' +
+      '        These variables ARE being read, but they hold the placeholder values — defining them\n' +
+      '        is not enough, they have to be CHANGED to something of your own, e.g.\n' +
+      '          ADMIN_USERNAME=lumiere_owner\n' +
+      '          ADMIN_PASSWORD=<a long unique password, 8+ characters>\n' +
+      '        Set them in your host dashboard (Railway -> your service -> Variables) and redeploy.\n' +
+      '        A local .env file does NOT reach the deploy: it is gitignored and .dockerignored,\n' +
+      '        and only the Variables injected into the running container are read.'
+  );
   process.exit(1);
 }
 if (IS_PRODUCTION && ADMIN_PASSWORD.length < 8) {
-  console.warn('[config] WARNING: ADMIN_PASSWORD is shorter than 8 characters — use a long, unique value in production.');
+  console.warn(
+    `[config] WARNING: ADMIN_PASSWORD is only ${ADMIN_PASSWORD.length} characters — use a long, unique value in production.`
+  );
 }
 
 /** Length-safe, timing-safe string comparison (both sides are hashed first, so lengths always match). */
