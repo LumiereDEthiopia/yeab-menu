@@ -1,16 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import Sidebar from '../components/layout/Sidebar';
 import TopTabs from '../components/layout/TopTabs';
-import { Category, Gender, getPerfumeSizePrices, getPerfumeStartingPrice, Perfume } from '../lib/data';
-import { usePerfumes, useCatalogImages, resolveCatalogImage } from '../lib/api';
+import { Category, Gender, getStockStatusForSize, Perfume } from '../lib/data';
+import { getCatalogCategorySetting, getCatalogSizePrice, getCatalogSizeUnit, usePerfumes, useCatalogImages, useCatalogSizeImages, useCategorySettings, resolveCatalogSizeImage } from '../lib/api';
 import PerfumeSlide from '../components/perfume/PerfumeSlide';
 import PerfumeDetailsModal from '../components/perfume/PerfumeDetailsModal';
 import { AnimatePresence, motion } from 'motion/react';
-import { Menu, ChevronLeft, Search, X, TriangleAlert } from 'lucide-react';
+import { Menu, ChevronLeft, Search, X } from 'lucide-react';
 
 export default function CatalogPage() {
-  const { perfumes, loading, dbEmpty } = usePerfumes();
+  const { perfumes, loading } = usePerfumes();
   const { images: catalogImages } = useCatalogImages();
+  const { images: catalogSizeImages } = useCatalogSizeImages();
+  const { categories: categorySettings } = useCategorySettings();
   const [activeCategory, setActiveCategory] = useState<Category | 'All'>('All');
   const [activeGender, setActiveGender] = useState<Gender | 'All'>('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -18,6 +20,7 @@ export default function CatalogPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [direction, setDirection] = useState(0);
   const [selectedPerfume, setSelectedPerfume] = useState<Perfume | null>(null);
+  const [selectedSizes, setSelectedSizes] = useState<Record<string, 1 | 2>>({});
 
   const filteredPerfumes = perfumes.filter((perfume) => {
     const categoryMatch = activeCategory === 'All' || perfume.category === activeCategory;
@@ -95,6 +98,7 @@ export default function CatalogPage() {
         <Sidebar 
           activeCategory={activeCategory} 
           setActiveCategory={setActiveCategory as any} 
+          categorySettings={categorySettings}
           isOpen={isSidebarOpen}
           setIsOpen={setIsSidebarOpen}
         />
@@ -138,19 +142,6 @@ export default function CatalogPage() {
           </div>
         </div>
 
-        {dbEmpty && (
-          <div
-            role="status"
-            className="mb-2 flex flex-shrink-0 items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-900"
-          >
-            <TriangleAlert size={16} className="mt-0.5 flex-shrink-0" />
-            <p className="text-[11px] leading-relaxed">
-              <strong>Your database currently has no saved perfumes.</strong>{' '}
-              If perfumes you added earlier disappeared after a Railway deploy, the deployment has no persistent volume — the database file is wiped on every redeploy. Fix: in Railway, open your service → Volumes → + New Volume, set the mount path to /data, then redeploy. Everything you save afterwards survives future deploys. (Any list you saw right after a deploy was demo data, not database content.)
-            </p>
-          </div>
-        )}
-
         {/* Content Slider Area */}
         <div className="flex-1 relative min-h-0">
           <AnimatePresence initial={false} custom={direction}>
@@ -167,47 +158,91 @@ export default function CatalogPage() {
                 className="absolute inset-0 overflow-y-auto hide-scrollbar sm:custom-scrollbar pb-20 px-2 lg:px-4"
               >
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 lg:gap-6 pt-3 sm:pt-4">
-                  {filteredPerfumes.map(perfume => (
-                    <div 
-                      key={perfume.id} 
-                      onClick={() => {
-                        setSelectedPerfume(perfume);
-                      }}
-                      className="min-w-0 bg-white rounded-[1.5rem] p-3 sm:p-4 lg:p-5 flex flex-col items-center cursor-pointer shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all border border-gray-100"
-                    >
-                      <div className="w-full aspect-[4/5] bg-[#fcf9f2] rounded-xl overflow-hidden mb-4">
-                        <img
-                          src={resolveCatalogImage(perfume, catalogImages)}
-                          alt={perfume.name}
-                          className={`w-full h-full object-center ${perfume.category === 'Luxury Perfume' ? 'object-contain p-3' : 'object-cover'}`} 
-                        />
-                      </div>
-                      <div className="w-full text-left flex flex-col flex-1">
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                          <div className="text-[9px] lg:text-[10px] font-bold text-gray-400 tracking-widest uppercase">
-                            {perfume.code}
+                  {filteredPerfumes.map(perfume => {
+                    const categorySetting = getCatalogCategorySetting(categorySettings, perfume.category, perfume.unit);
+                    const selectedSize = selectedSizes[perfume.id] ?? 1;
+                    const sizeLabel = categorySetting
+                      ? `${selectedSize === 1 ? categorySetting.size1 : categorySetting.size2} ${getCatalogSizeUnit(perfume, categorySetting)}`
+                      : '';
+                    const mainImage = resolveCatalogSizeImage(
+                      perfume,
+                      selectedSize,
+                      categorySetting,
+                      catalogSizeImages,
+                      catalogImages
+                    );
+                    const selectedPrice = categorySetting ? getCatalogSizePrice(perfume, categorySetting, selectedSize) : perfume.price;
+                    const selectedStockStatus = categorySetting
+                      ? getStockStatusForSize(perfume, selectedSize)
+                      : perfume.stockStatus;
+
+                    return (
+                      <div 
+                        key={perfume.id} 
+                        onClick={() => {
+                          setSelectedPerfume(perfume);
+                        }}
+                        className="min-w-0 bg-white rounded-[1.5rem] p-3 sm:p-4 lg:p-5 flex flex-col items-center cursor-pointer shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all border border-gray-100"
+                      >
+                        <div className="w-full aspect-[4/5] bg-[#fcf9f2] rounded-xl overflow-hidden mb-4">
+                          <img
+                            key={`${perfume.id}-${selectedSize}-${mainImage}`}
+                            src={mainImage}
+                            alt={sizeLabel ? `${perfume.name} ${sizeLabel}` : perfume.name}
+                            /* Minimize the photo inside the card's fixed 4:5 image box:
+                               object-contain + padding scales any size-specific image
+                               down to fit the card instead of cropping/zooming it. */
+                            className="w-full h-full object-contain p-3"
+                          />
+                        </div>
+                        <div className="w-full text-left flex flex-col flex-1">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <div className="text-[9px] lg:text-[10px] font-bold text-gray-400 tracking-widest uppercase">
+                              {perfume.code}
+                            </div>
+                            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[8px] lg:text-[9px] font-bold uppercase tracking-widest ${getStockBadgeClass(selectedStockStatus)}`}>
+                              {selectedStockStatus || 'In Stock'}
+                            </span>
                           </div>
-                          <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[8px] lg:text-[9px] font-bold uppercase tracking-widest ${getStockBadgeClass(perfume.stockStatus)}`}>
-                            {perfume.stockStatus || 'In Stock'}
-                          </span>
+                          <h3 className="font-bold text-xs lg:text-sm text-[#1a2c3d] leading-tight mb-2 flex-1 line-clamp-2">
+                            {perfume.name}
+                          </h3>
+                          {categorySetting && (
+                            <div role="group" aria-label={`Choose bottle size for ${perfume.name}`} className="mb-2 grid grid-cols-2 gap-2">
+                              {([1, 2] as const).map(size => (
+                                <button
+                                  key={size}
+                                  type="button"
+                                  aria-pressed={selectedSize === size}
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    setSelectedSizes(previous => ({ ...previous, [perfume.id]: size }));
+                                  }}
+                                  className={`min-h-9 rounded-lg border px-2 py-2 text-xs font-bold transition-colors ${
+                                    selectedSize === size
+                                      ? 'border-black bg-black text-white'
+                                      : 'border-gray-200 bg-white text-gray-600 hover:border-gray-400'
+                                  }`}
+                                >
+                                  {size === 1 ? categorySetting.size1 : categorySetting.size2} {getCatalogSizeUnit(perfume, categorySetting)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <div className="mt-auto font-bold text-sm sm:text-base text-black">
+                            {categorySetting
+                              ? `${selectedPrice.toLocaleString()} ETB`
+                              : `${perfume.price.toLocaleString()} ETB`}
+                          </div>
+                          {categorySetting && getCatalogSizeUnit(perfume, categorySetting) === 'gram' && typeof perfume.pricePerGram === 'number' && (
+                            <div className="mt-0.5 text-[10px] font-medium text-gray-500">
+                              {perfume.pricePerGram.toLocaleString()} ETB / gram
+                            </div>
+                          )}
                         </div>
-                        <h3 className="font-bold text-xs lg:text-sm text-[#1a2c3d] leading-tight mb-2 flex-1 line-clamp-2">
-                          {perfume.name}
-                        </h3>
-                        <div className="font-bold text-sm sm:text-base text-black mt-auto">
-                          {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
-                          {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
-                        </div>
-                        {getPerfumeSizePrices(perfume).length > 0 && (
-                          <p className="mt-1 text-[10px] text-gray-500">
-                            {getPerfumeSizePrices(perfume).map(option =>
-                              `${option.amount} ${perfume.sizeUnit ?? 'ml'} · ${option.price.toLocaleString()} ETB`
-                            ).join(' / ')}
-                          </p>
-                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </motion.div>
             ) : (
@@ -234,6 +269,10 @@ export default function CatalogPage() {
         {selectedPerfume && (
           <PerfumeDetailsModal 
             perfume={selectedPerfume} 
+            categorySetting={getCatalogCategorySetting(categorySettings, selectedPerfume.category, selectedPerfume.unit)}
+            categorySizeImages={catalogSizeImages}
+            initialSize={selectedSizes[selectedPerfume.id] ?? 1}
+            onSizeChange={size => setSelectedSizes(previous => ({ ...previous, [selectedPerfume.id]: size }))}
             onClose={() => setSelectedPerfume(null)} 
           />
         )}

@@ -1,50 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Perfume, MOCK_PERFUMES, Gender, Category } from './data';
 
-function normalizePerfumeSizePrices(perfume: Perfume): Perfume {
-  let value: unknown = perfume.sizePrices;
-  if (typeof value === 'string') {
-    try {
-      value = JSON.parse(value);
-    } catch (error) {
-      console.error(`Invalid size-price data for perfume ${perfume.id}:`, error);
-      value = [];
-    }
-  }
-
-  const sizePrices = Array.isArray(value)
-    ? value.filter((option): option is { amount: number; price: number } =>
-      option !== null &&
-      typeof option === 'object' &&
-      Number.isFinite(option.amount) &&
-      Number.isFinite(option.price))
-    : [];
-
-  return {
-    ...perfume,
-    sizeUnit: perfume.sizeUnit === 'g' ? 'g' : 'ml',
-    sizePrices,
-  };
-}
-
 export function usePerfumes() {
   const [perfumes, setPerfumes] = useState<Perfume[]>(MOCK_PERFUMES);
   const [loading, setLoading] = useState(true);
-  const [dbEmpty, setDbEmpty] = useState(false);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     fetch('/api/perfumes')
-      .then(res => {
-        if (!res.ok) throw new Error(`API responded with status ${res.status}`);
-        return res.json() as Promise<Perfume[]>;
-      })
+      .then(res => res.json())
       .then(data => {
-        const savedPerfumes = Array.isArray(data)
-          ? (data as Perfume[]).map(normalizePerfumeSizePrices)
-          : [];
-        setDbEmpty(savedPerfumes.length === 0);
-        if (savedPerfumes.length > 0) {
-          setPerfumes(savedPerfumes);
+        if (data && data.length > 0) {
+          setPerfumes(data);
         } else {
           // Fallback to MOCK_PERFUMES if DB is empty for demo purposes
           setPerfumes(MOCK_PERFUMES);
@@ -52,7 +18,6 @@ export function usePerfumes() {
       })
       .catch(err => {
         console.error('Failed to fetch perfumes:', err);
-        setDbEmpty(false);
         setPerfumes(MOCK_PERFUMES);
       })
       .finally(() => {
@@ -60,7 +25,20 @@ export function usePerfumes() {
       });
   }, []);
 
-  return { perfumes, loading, setPerfumes, dbEmpty };
+  useEffect(() => {
+    reload();
+    const refreshWhenActive = () => {
+      if (document.visibilityState === 'visible') reload();
+    };
+    window.addEventListener('focus', refreshWhenActive);
+    document.addEventListener('visibilitychange', refreshWhenActive);
+    return () => {
+      window.removeEventListener('focus', refreshWhenActive);
+      document.removeEventListener('visibilitychange', refreshWhenActive);
+    };
+  }, [reload]);
+
+  return { perfumes, loading, setPerfumes };
 }
 
 export function useAccordColors() {
@@ -93,7 +71,7 @@ export function useAdminPerfumes() {
         return res.json();
       })
       .then((data: Perfume[]) => {
-        const list = Array.isArray(data) ? data.map(normalizePerfumeSizePrices) : [];
+        const list = Array.isArray(data) ? data : [];
         setPerfumes(list);
         setDbEmpty(list.length === 0);
         setLoadError(false);
@@ -127,6 +105,161 @@ export interface CatalogImage {
   image: string;
 }
 
+export interface CategorySettingOption {
+  size: string;
+  price: number;
+  image: string | null;
+}
+
+export interface CategorySetting {
+  category: Category;
+  unit: 'ml' | 'gram';
+  size1: string;
+  size2: string;
+  price1: number;
+  price2: number;
+  image1: string | null;
+  image2: string | null;
+  options: CategorySettingOption[];
+}
+
+export function getCatalogCategorySetting(
+  settings: CategorySetting[],
+  category: Category,
+  productUnit?: CategorySetting['unit'] | null
+): CategorySetting {
+  const normalizedCategory = category.trim().toLocaleLowerCase();
+  const configured = settings.find(setting => setting.category.trim().toLocaleLowerCase() === normalizedCategory);
+  if (configured) return configured;
+
+  const defaultSetting = DEFAULT_CATEGORY_SETTINGS.find(
+    setting => setting.category.trim().toLocaleLowerCase() === normalizedCategory
+  );
+  if (defaultSetting) return defaultSetting;
+
+  const unit = productUnit ?? 'ml';
+  const sizes = unit === 'gram' ? ['6', '12'] : ['50', '100'];
+  return {
+    category,
+    unit,
+    size1: sizes[0],
+    size2: sizes[1],
+    price1: 0,
+    price2: 0,
+    image1: null,
+    image2: null,
+    options: sizes.map(size => ({ size, price: 0, image: null })),
+  };
+}
+
+type LegacyCategorySetting = Omit<CategorySetting, 'options'> & {
+  options?: CategorySettingOption[];
+};
+
+function normalizeCategorySetting(setting: LegacyCategorySetting): CategorySetting {
+  return {
+    ...setting,
+    options: Array.isArray(setting.options)
+      ? setting.options
+      : [
+          { size: setting.size1, price: setting.price1, image: setting.image1 },
+          { size: setting.size2, price: setting.price2, image: setting.image2 },
+        ],
+  };
+}
+
+export function getCatalogSizePrice(
+  perfume: Pick<Perfume, 'price' | 'pricePerGram' | 'unit' | 'sizePrice1' | 'sizePrice2'>,
+  setting: CategorySetting,
+  size: 1 | 2
+): number {
+  const weight = Number(size === 1 ? setting.size1 : setting.size2);
+  if ((perfume.unit ?? setting.unit) === 'gram' && typeof perfume.pricePerGram === 'number' && Number.isFinite(perfume.pricePerGram)) {
+    return Math.round(weight * perfume.pricePerGram * 100) / 100;
+  }
+  const productPrice = size === 1 ? perfume.sizePrice1 : perfume.sizePrice2;
+  if (typeof productPrice === 'number' && Number.isFinite(productPrice)) return productPrice;
+  const configuredPrice = size === 1 ? setting.price1 : setting.price2;
+  return configuredPrice || perfume.price;
+}
+
+export function getCatalogSizeUnit(
+  perfume: Pick<Perfume, 'unit'>,
+  setting: CategorySetting
+): CategorySetting['unit'] {
+  return perfume.unit ?? setting.unit;
+}
+
+export interface CatalogSizeImage {
+  gender: Gender;
+  category: Category;
+  size: 1 | 2;
+  image: string;
+}
+
+const DEFAULT_CATEGORY_SETTINGS: CategorySetting[] = [
+  { category: 'Perfume', unit: 'ml', size1: '50', size2: '100', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '50', price: 0, image: null }, { size: '100', price: 0, image: null }] },
+  { category: 'Brand Perfume', unit: 'ml', size1: '50', size2: '100', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '50', price: 0, image: null }, { size: '100', price: 0, image: null }] },
+  { category: 'Luxury Perfume', unit: 'ml', size1: '50', size2: '100', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '50', price: 0, image: null }, { size: '100', price: 0, image: null }] },
+  { category: 'Oil', unit: 'ml', size1: '3', size2: '6', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '3', price: 0, image: null }, { size: '6', price: 0, image: null }] },
+  { category: 'Musk', unit: 'gram', size1: '6', size2: '12', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '6', price: 0, image: null }, { size: '12', price: 0, image: null }] },
+  { category: '3ml Oil', unit: 'ml', size1: '3', size2: '6', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '3', price: 0, image: null }, { size: '6', price: 0, image: null }] },
+  { category: 'Cream/Jelly', unit: 'gram', size1: '30', size2: '50', price1: 0, price2: 0, image1: null, image2: null, options: [{ size: '30', price: 0, image: null }, { size: '50', price: 0, image: null }] },
+];
+
+export function useCategorySettings() {
+  const [categories, setCategories] = useState<CategorySetting[]>(DEFAULT_CATEGORY_SETTINGS);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  const reload = useCallback(() => {
+    fetch('/api/category-settings')
+      .then(res => {
+        if (!res.ok) throw new Error(`API responded with status ${res.status}`);
+        return res.json();
+      })
+      .then((data: LegacyCategorySetting[]) => {
+        const saved = Array.isArray(data) ? data.map(normalizeCategorySetting) : [];
+        const savedByName = new Map(saved.map(setting => [setting.category, setting]));
+        const defaults = DEFAULT_CATEGORY_SETTINGS.map(setting => savedByName.get(setting.category) ?? setting);
+        const custom = saved.filter(setting => !DEFAULT_CATEGORY_SETTINGS.some(fallback => fallback.category === setting.category));
+        setCategories([...defaults, ...custom]);
+        setLoadError(false);
+      })
+      .catch(err => {
+        console.error('Failed to fetch category settings:', err);
+        setLoadError(true);
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return { categories, setCategories, loading, loadError, reload };
+}
+
+export function useCatalogSizeImages() {
+  const [images, setImages] = useState<CatalogSizeImage[]>([]);
+
+  const reload = useCallback(() => {
+    fetch('/api/catalog-size-images')
+      .then(res => {
+        if (!res.ok) throw new Error(`API responded with status ${res.status}`);
+        return res.json();
+      })
+      .then((data: CatalogSizeImage[]) => setImages(Array.isArray(data) ? data : []))
+      .catch(err => console.error('Failed to fetch size-specific catalog images:', err));
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return { images, setImages, reload };
+}
+
 export function useCatalogImages() {
   const [images, setImages] = useState<CatalogImage[]>([]);
 
@@ -135,6 +268,23 @@ export function useCatalogImages() {
       .then(res => (res.ok ? res.json() : []))
       .then((data: CatalogImage[]) => setImages(Array.isArray(data) ? data : []))
       .catch(err => console.error('Failed to fetch catalog images:', err));
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return { images, setImages, reload };
+}
+
+export function useDefaultPerfumeImages() {
+  const [images, setImages] = useState<string[]>([]);
+
+  const reload = useCallback(() => {
+    fetch('/api/perfume-default-images')
+      .then(res => (res.ok ? res.json() : []))
+      .then((data: string[]) => setImages(Array.isArray(data) ? data : []))
+      .catch(err => console.error('Failed to fetch default perfume images:', err));
   }, []);
 
   useEffect(() => {
@@ -188,4 +338,25 @@ export function resolveCatalogImage(
   const any = catalogImagePool(library);
   if (any.length > 0) return pickFromPool(any, seed);
   return stored || '/images/perfumes/normal.jpg';
+}
+
+export function resolveCatalogSizeImage(
+  perfume: Pick<Perfume, 'gender' | 'category' | 'sizeImage1' | 'sizeImage2'> & {
+    mainImage?: string | null;
+    code?: string;
+    id?: string;
+  },
+  size: 1 | 2,
+  categorySetting: CategorySetting | undefined,
+  categorySizeImages: CatalogSizeImage[],
+  catalogImages: CatalogImage[]
+): string {
+  const productImage = size === 1 ? perfume.sizeImage1 : perfume.sizeImage2;
+  const sharedSizeImage = categorySizeImages.find(image =>
+    image.gender === perfume.gender && image.category === perfume.category && image.size === size
+  )?.image;
+  const categoryImage = size === 1 ? categorySetting?.image1 : categorySetting?.image2;
+  const categoryOptionImage = categorySetting?.options[size - 1]?.image;
+
+  return productImage || sharedSizeImage || categoryImage || categoryOptionImage || resolveCatalogImage(perfume, catalogImages);
 }

@@ -1,48 +1,36 @@
-/**
- * On-demand, consistent SQLite backup using `VACUUM INTO`.
- *
- * Usage:  npm run db:backup
- * Honors LUMIERE_DATA_DIR (same resolution logic as server.ts).
- * The snapshot is written into <DATA_DIR>/backups/perfumes-manual-<timestamp>.db
- * and never touches the live database.
- */
+import 'dotenv/config';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { spawn } from 'node:child_process';
 
-const DATA_DIR = process.env.LUMIERE_DATA_DIR
-  || (process.env.LOCALAPPDATA
-    ? path.join(process.env.LOCALAPPDATA, 'LumiereMenu')
-    : path.join(os.homedir(), '.lumiere-menu'));
-const DB_PATH = path.join(DATA_DIR, 'perfumes.db');
+const databaseUrl = process.env.DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('Set DATABASE_URL before creating a PostgreSQL backup.');
 
-// Optional off-volume backup location (LUMIERE_BACKUP_DIR); defaults to
-// <DATA_DIR>/backups when unset.
-const BACKUP_DIR = (process.env.LUMIERE_BACKUP_DIR && process.env.LUMIERE_BACKUP_DIR.trim().length > 0)
-  ? process.env.LUMIERE_BACKUP_DIR.trim()
-  : path.join(DATA_DIR, 'backups');
-
-if (!fs.existsSync(DB_PATH)) {
-  console.error(`No database found at ${DB_PATH}`);
-  console.error('Start the server once to create it, or set LUMIERE_DATA_DIR to the right folder.');
-  process.exit(1);
-}
-
-const backupDir = BACKUP_DIR;
-fs.mkdirSync(backupDir, { recursive: true });
-
+const backupDirectory = process.env.LUMIERE_BACKUP_DIR?.trim()
+  || path.join(process.cwd(), 'backups');
+fs.mkdirSync(backupDirectory, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const target = path.join(backupDir, `perfumes-manual-${stamp}.db`);
+const backupPath = path.join(backupDirectory, `lumiere-postgres-${stamp}.dump`);
+const pgDump = process.env.PG_DUMP_PATH?.trim() || (os.platform() === 'win32' ? 'pg_dump.exe' : 'pg_dump');
 
-const db = new DatabaseSync(DB_PATH);
-try {
-  // VACUUM INTO writes a compact, transactionally consistent snapshot of the
-  // whole database without interrupting readers/writers.
-  db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
-} finally {
-  db.close();
-}
-
-const sizeKb = Math.round(fs.statSync(target).size / 1024);
-console.log(`Backup created: ${target} (${sizeKb} KB)`);
+const backup = spawn(pgDump, ['--format=custom', '--no-owner', '--file', backupPath], {
+  env: { ...process.env, PGDATABASE: databaseUrl },
+  stdio: ['ignore', 'ignore', 'pipe'],
+});
+let errorOutput = '';
+backup.stderr.setEncoding('utf8');
+backup.stderr.on('data', chunk => { errorOutput += chunk; });
+backup.on('error', error => {
+  console.error(`Could not run pg_dump (${pgDump}). Install PostgreSQL client tools or set PG_DUMP_PATH.`, error);
+  process.exitCode = 1;
+});
+backup.on('close', code => {
+  if (code !== 0) {
+    console.error(`PostgreSQL backup failed with exit code ${code}: ${errorOutput.trim()}`);
+    if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`PostgreSQL backup created: ${backupPath}`);
+});

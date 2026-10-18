@@ -1,164 +1,130 @@
-# Data Persistence on Railway — Full Guide
+# PostgreSQL data persistence and migration
 
-This document explains how the application stores data, how it survives (or
-fails to survive) Docker rebuilds and re-deployments on Railway, what has been
-hardened, and the exact backup/recovery procedures.
+The app stores its catalog in PostgreSQL using the Node.js `pg` client. Local
+development and hosted deployments use the same database implementation; there
+is no SQLite database in the runtime application.
 
----
+## Database contents
 
-## The stack
+The server creates and additively updates these tables during startup:
 
-| Question | Answer |
-| --- | --- |
-| Database engine | **SQLite** (Node built-in `node:sqlite`, `DatabaseSync`) |
-| Database file | `<LUMIERE_DATA_DIR>/perfumes.db` |
-| Data stored | `perfumes`, `accord_colors`, `catalog_images` (including uploaded images, which live inside the DB) |
-| In production (Docker) | `/data/perfumes.db` (`LUMIERE_DATA_DIR=/data` from the Dockerfile) |
-| Backups | `LUMIERE_BACKUP_DIR` (default `<LUMIERE_DATA_DIR>/backups`) |
-| In production (Docker) | `/backups/...` if `LUMIERE_BACKUP_DIR=/backups` is set, else `/data/backups/...` |
+- `perfumes` — product fields, including uploaded images and JSON-encoded
+  catalog data.
+- `accord_colors` — custom accord colors.
+- `catalog_images` and `catalog_size_images` — shared category imagery.
+- `category_settings` — product category size, unit, and price settings.
 
-PostgreSQL is **not** used. Rationale: every database access in the codebase
-uses Node's synchronous `node:sqlite` API with JSON column storage; the workload
-is a single-instance, single-writer catalog/menu. Migrating to Postgres would be
-a full rewrite with real risk to existing data — SQLite on a mounted volume is
-the supported, durable pattern here.
+Startup requires a working `DATABASE_URL`. The app does not fall back to a
+local file or create a database server. Schema setup uses `CREATE TABLE IF NOT
+EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`; it does not drop or
+truncate existing tables.
 
----
+## Configure PostgreSQL locally
 
-## Does the data survive a Railway redeploy?
+1. Start a PostgreSQL instance and create a database for the app.
+2. Copy `.env.example` to `.env`.
+3. Set `DATABASE_URL` to the database connection string, for example:
 
-**Yes, if and only if a Railway Volume is mounted at `/data`.**
+   ```dotenv
+   DATABASE_URL=postgresql://username:password@localhost:5432/lumiere
+   ```
 
-- Railway's container filesystem is **ephemeral**: it is destroyed on every
-  redeploy/restart.
-- The SQLite database must therefore live on a **Volume**. The Dockerfile
-  already sets `LUMIERE_DATA_DIR=/data`, and `.dockerignore` excludes `*.db`
-  and `backups/` so the database is never baked into the image.
-- A deploy with no volume simply creates a brand-new empty database under
-  `/data` on the ephemeral disk — all previously stored perfumes, images and
-  settings are gone the moment the container is replaced.
+4. Set a unique `JWT_SECRET` and non-default admin credentials before exposing
+   the app to a network.
+5. Run `npm run dev`. The server initializes the application schema on startup.
 
-### How to verify you are persisted
+Never commit `.env` or put real credentials in `.env.example`.
 
-1. In Railway open the service → **Settings → Volumes**. There must be a volume.
-2. Check its **Mount Path** equals `/data`.
-3. In the service logs, on boot you should see:
-   `[data] Database file: /data/perfumes.db` and the
-   `[data] WARNING: ... MOUNTED VOLUME ...` line (present in production).
-4. Add at least one product in the admin panel, redeploy, and confirm it is
-   still there.
+## Railway deployment
 
-> If you see `[config] WARNING: LUMIERE_DATA_DIR is not set` in the service
-> logs, create the volume, mount it at `/data`, and set `LUMIERE_DATA_DIR=/data`
-> in Variables. The server deliberately **warns instead of refusing to boot**
-> here: staying up keeps the catalog reachable so you can fix the setting from
-> the dashboard, whereas crashing would only remove your way in.
+1. Add a PostgreSQL service to the Railway project.
+2. In the app service's **Variables**, add a reference to that PostgreSQL
+   service's `DATABASE_URL`.
+3. Set `JWT_SECRET`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` in the app service.
+4. Deploy the app. It requires PostgreSQL to be reachable and initializes the
+   schema during startup.
 
----
+Railway injects the database URL at runtime. Do not paste a production URL into
+source files, Docker build arguments, or committed environment templates.
 
-## What could cause data loss
+## Import an existing SQLite catalog
 
-| Risk | Mitigation (already in place / now hardened) |
-| --- | --- |
-| No volume mounted at `/data` | Documented: production logs a prominent `LUMIERE_DATA_DIR` warning naming the fix. The `Dockerfile` defaults to `/data` so a mounted volume is picked up automatically. |
-| Misconfigured service writing to ephemeral FS | `resolveDataDir()` warns loudly in `NODE_ENV=production` and every boot prints the resolved path, so an ephemeral location is visible in the logs. |
-| A future buggy schema migration | Hardened: the server snapshots `perfumes-pre-boot-<timestamp>.db` **before** migrations run on every boot. Current migrations are additive only. |
-| Losing the primary volume takes backups with it | Hardened: `LUMIERE_BACKUP_DIR` can point at a second volume. |
-| Running `npm run seed*` against production | Hardened: documented as forbidden; seed scripts are local-only tools and are **not** wired into the Dockerfile, `railway.json` or `package.json` lifecycle scripts. |
-| Manual destructive SQL | Documented as forbidden (no `DROP`, no plain `DELETE`, no `VACUUM` without `INTO`). |
-| Hard crash / redeploy mid-write | SQLite's default rollback journal + full sync together with the graceful `SIGTERM` handler (closes the DB before exit) keep the file durable. A 5s `busy_timeout` prevents spurious "database is locked" during concurrent backups. |
+The one-time importer copies products and related settings/images from the
+existing local SQLite file. It does not modify the source file. The destination
+must be the intended PostgreSQL database, and importing updates rows with
+matching primary keys; take a PostgreSQL backup first if the target already
+contains data.
 
----
+1. Configure `DATABASE_URL` for the destination PostgreSQL database.
+2. Start the app once against that database so the schema is initialized, then
+   stop it.
+3. If the SQLite source is not at the default location, set `SQLITE_DB_PATH` to
+   its path. The default is `%LOCALAPPDATA%\\LumiereMenu\\perfumes.db` on
+   Windows or `~/.lumiere-menu/perfumes.db` on other systems.
+4. Run:
 
-## Directory layout (by default)
+   ```sh
+   npm run db:migrate-sqlite
+   ```
 
-```
-/data/                  ← Railway Volume (must be mounted)
-  perfumes.db           ← the live database
-  backups/              ← automatic backups (unless LUMIERE_BACKUP_DIR is set)
-    perfumes-YYYY-MM-DD.db          (daily, keeps last 7)
-    perfumes-pre-boot-<stamp>.db    (before every migration run)
-    perfumes-manual-<stamp>.db      (npm run db:backup)
-```
+5. Check the importer row counts and verify the catalog in the app before
+   switching production traffic to the new database.
 
-Set `LUMIERE_BACKUP_DIR=/backups` and mount a second volume at `/backups` to
-keep backups independent of the primary volume.
+The importer uses one transaction for the destination data. A missing
+destination table or an import failure rolls back the import and reports the
+error. Source-side optional tables absent from an older SQLite database are
+skipped and reported; the required `perfumes` table must exist.
+`DATABASE_URL` must point to the intended destination; no hosted database is
+selected automatically.
 
----
+## Backups and restore
 
-## Backup procedures
+Create a custom-format PostgreSQL backup with:
 
-### Automatic (on every boot)
-The server:
-1. snapshots the existing DB to `perfumes-pre-boot-<stamp>.db` (before schema
-   migrations),
-2. copies the DB to `perfumes-YYYY-MM-DD.db` (retention: 7),
-3. prints `[data] Backup saved: <path>`.
-
-### Manual, on demand (safe while the app is running)
-```bash
+```sh
 npm run db:backup
 ```
-Writes `perfumes-manual-<stamp>.db` into `LUMIERE_BACKUP_DIR`. Uses SQLite
-`VACUUM INTO`, which produces a transactionally consistent snapshot without
-interrupting readers/writers.
 
-### Off-platform copy (recommended schedule)
-Back the volume up externally (download `/data/perfumes.db`), e.g. weekly or
-before any major deploy, so a full-platform incident still has recovery data.
+This requires PostgreSQL client tools (`pg_dump`) and `DATABASE_URL`. By
+default, the output is written under `./backups`; set `LUMIERE_BACKUP_DIR` to
+choose another directory. Store copies outside the database host and restrict
+access because a backup contains the full catalog and any uploaded images.
 
----
+To restore a dump, first stop app writes and confirm the destination database.
+Use PostgreSQL's `pg_restore` client, for example:
 
-## Recovery procedures
-
-```bash
-# 1. Stop the service (scale to zero) so the DB is closed cleanly.
-# 2. Restore a good snapshot over the live file. If LUMIERE_BACKUP_DIR is a
-#    separate volume copy from there; otherwise from /data/backups.
-cp <backup-dir>/perfumes-manual-<timestamp>.db /data/perfumes.db
-
-# 3. Restart the service. On boot the server:
-#      - creates any missing tables (additive only),
-#      - runs the pre-boot snapshot,
-#      - starts serving.
-#    It will NOT delete, truncate, or reseed existing rows.
+```sh
+pg_restore --clean --if-exists --no-owner --dbname="$DATABASE_URL" path/to/backup.dump
 ```
 
-Recovery is manual on purpose: nothing at deploy time resets or re-seeds data.
+`--clean` drops objects present in the dump before restoring them, so only use
+this against a database you intend to replace. For a safer merge-style restore,
+restore into a separate empty database and verify it before directing the app
+to it. After restore, restart the app and verify `/api/health` and the catalog.
 
----
+## Seed scripts
 
-## Migration safety
+`npm run seed` and `npm run seed:male` UPSERT catalog entries and may overwrite
+admin edits for seeded product IDs. They are local setup tools and should not
+be run against production unless that overwrite is intentional.
 
-- Migrations are **additive only**: `CREATE TABLE IF NOT EXISTS`, and
-  `ALTER TABLE ... ADD COLUMN` guarded by `PRAGMA table_info(...)` checks.
-- There is no `DROP`, `TRUNCATE`, or destructive reset anywhere in startup,
-  `Dockerfile`, `railway.json`, or `package.json` scripts.
-- The pre-boot snapshot gives a manual rollback point per upgrade.
-- Seed scripts (`npm run seed`, `npm run seed:male`) are **not** part of any
-  deploy path and upsert seeded ids only — treat them as local-setup tools.
+## Environment variables
 
----
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Required PostgreSQL connection string. |
+| `JWT_SECRET` | Signs admin JWTs; configure a stable, unique secret for deployments. |
+| `ADMIN_USERNAME` | Admin login name. |
+| `ADMIN_PASSWORD` | Admin password. |
+| `LUMIERE_BACKUP_DIR` | Optional `pg_dump` output directory; defaults to `./backups`. |
+| `SQLITE_DB_PATH` | Optional source path used only by the SQLite importer. |
 
-## Environment variables reference
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `LUMIERE_DATA_DIR` | `%LOCALAPPDATA%\LumiereMenu` (Win) / `~/.lumiere-menu` (Linux) | Live SQLite DB location. **Set this to a mounted volume in production** — otherwise the catalog is deleted on every redeploy. The server warns but does not refuse to boot. |
-| `LUMIERE_BACKUP_DIR` | `<LUMIERE_DATA_DIR>/backups` | Backup location. Set to a second volume in production. |
-
-All other settings (`PORT`, `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`)
-do not affect storage.
-
----
-
-## Files involved
+## Related files
 
 | Concern | Location |
 | --- | --- |
-| Data-dir resolution + production guard | `server.ts` — `resolveDataDir()`, `BACKUP_DIR` |
-| Pre-boot snapshot + `busy_timeout` | `server.ts` — `backupDatabaseFile('perfumes-pre-boot')`, `PRAGMA busy_timeout` |
-| Daily backup rotation | `server.ts` — daily backup block (keeps 7) |
-| On-demand backup | `scripts/backup-db.mts` — `npm run db:backup` |
-| Image / Volume config | `Dockerfile` — `ENV LUMIERE_DATA_DIR=/data`; `.dockerignore` — excludes `*.db`, `backups/` |
-| Deploy config | `railway.json`, `package.json` (no destructive hooks) |
+| PostgreSQL pool, schema, and API | `server.ts` |
+| SQLite-to-PostgreSQL importer | `scripts/migrate-sqlite-to-postgres.mts` |
+| PostgreSQL backup | `scripts/backup-db.mts` |
+| Database scripts and dependencies | `package.json` |
+| Railway deployment configuration | `railway.json` and `Dockerfile` |

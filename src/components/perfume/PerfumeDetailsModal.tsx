@@ -1,25 +1,44 @@
-import React, { useEffect } from 'react';
-import { getPerfumeSizePrices, Perfume } from '../../lib/data';
-import { useAccordColors, useCatalogImages, resolveCatalogImage, isPlaceholderCatalogImage } from '../../lib/api';
+import React, { useEffect, useState } from 'react';
+import { getStockStatusForSize, Perfume, StockStatus } from '../../lib/data';
+import { CatalogSizeImage, CategorySetting, getCatalogSizePrice, getCatalogSizeUnit, useAccordColors, useCatalogImages, resolveCatalogImage, resolveCatalogSizeImage, isPlaceholderCatalogImage } from '../../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Star, Hourglass, Wind, Sun, Moon, ArrowRight } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 interface PerfumeDetailsModalProps {
   perfume: Perfume;
+  categorySetting?: CategorySetting;
+  categorySizeImages?: CatalogSizeImage[];
+  initialSize?: 1 | 2;
+  onSizeChange?: (size: 1 | 2) => void;
   onClose: () => void;
 }
 
-export default function PerfumeDetailsModal({ perfume, onClose }: PerfumeDetailsModalProps) {
+export default function PerfumeDetailsModal({ perfume, categorySetting, categorySizeImages = [], initialSize = 1, onSizeChange, onClose }: PerfumeDetailsModalProps) {
   const { colors } = useAccordColors();
   const { images: catalogImages } = useCatalogImages();
+  const [selectedSize, setSelectedSize] = useState<1 | 2>(initialSize);
 
-  // Catalog image library: placeholder bottles are replaced by the matching
-  // Gender × Category bucket image; custom uploads/pastes stay untouched.
+  // Explicit size photos take precedence; otherwise use the product or catalog image.
   const resolvedMainImage = resolveCatalogImage(perfume, catalogImages);
+  const displayedImage = resolveCatalogSizeImage(
+    perfume,
+    selectedSize,
+    categorySetting,
+    categorySizeImages,
+    catalogImages
+  );
   const resolvedMiniImage = isPlaceholderCatalogImage(perfume.miniImage)
     ? resolvedMainImage
     : (perfume.miniImage as string);
+  const selectedStockStatus = categorySetting
+    ? getStockStatusForSize(perfume, selectedSize)
+    : perfume.stockStatus || 'In Stock';
+  const getStockBadgeClass = (status: StockStatus) => {
+    if (status === 'Out Stock') return 'bg-red-50 text-red-700 border-red-200';
+    if (status === 'Low Stock') return 'bg-amber-50 text-amber-700 border-amber-200';
+    return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  };
 
   useEffect(() => {
     document.body.style.overflow = 'hidden';
@@ -98,8 +117,9 @@ export default function PerfumeDetailsModal({ perfume, onClose }: PerfumeDetails
       flex-shrink-0
     ">
             <motion.img
+              key={`${perfume.id}-${selectedSize}-${displayedImage}`}
               layoutId={`image-${perfume.id}`}
-              src={resolvedMainImage}
+              src={displayedImage}
               alt={perfume.name}
               className={`
           w-full 
@@ -179,6 +199,45 @@ export default function PerfumeDetailsModal({ perfume, onClose }: PerfumeDetails
               {perfume.brand}
             </p>
 
+            {categorySetting && (
+              <div className="mb-4 grid w-full grid-cols-2 gap-2">
+                {([1, 2] as const).map(size => {
+                  const sizeName = size === 1 ? categorySetting.size1 : categorySetting.size2;
+                  const price = getCatalogSizePrice(perfume, categorySetting, size);
+                  return (
+                    <button
+                      key={size}
+                      type="button"
+                      onClick={() => {
+                        setSelectedSize(size);
+                        onSizeChange?.(size);
+                      }}
+                      className={cn(
+                        'rounded-xl border px-3 py-3 text-left transition-colors',
+                        selectedSize === size ? 'border-black bg-gray-50 text-black' : 'border-gray-200 text-gray-500 hover:border-gray-400'
+                      )}
+                    >
+                      <span className="block text-xs font-bold">{sizeName} {getCatalogSizeUnit(perfume, categorySetting)}</span>
+                      <span className="block text-sm">{price.toLocaleString()} ETB</span>
+                      <span className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase ${getStockBadgeClass(getStockStatusForSize(perfume, size))}`}>
+                        {getStockStatusForSize(perfume, size)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {categorySetting && getCatalogSizeUnit(perfume, categorySetting) === 'gram' && typeof perfume.pricePerGram === 'number' && (
+              <p className="mb-4 text-sm font-medium text-gray-500">
+                {perfume.pricePerGram.toLocaleString()} ETB per gram
+              </p>
+            )}
+            {!categorySetting && (
+              <p className={`mb-4 inline-flex rounded-full border px-3 py-1 text-xs font-bold uppercase ${getStockBadgeClass(selectedStockStatus)}`}>
+                {selectedStockStatus}
+              </p>
+            )}
+
             {/* PRICE */}
             <div className="
         mt-auto 
@@ -192,19 +251,9 @@ export default function PerfumeDetailsModal({ perfume, onClose }: PerfumeDetails
         rounded-full 
         text-white
       ">
-              <div className="py-1 text-left">
-                {getPerfumeSizePrices(perfume).length > 0 ? (
-                  <div className="flex flex-wrap gap-x-3 gap-y-1">
-                    {getPerfumeSizePrices(perfume).map(option => (
-                      <span key={`${option.amount}-${option.price}`} className="text-xs font-bold tracking-wide">
-                        {option.amount} {perfume.sizeUnit ?? 'ml'} · {option.price.toLocaleString()} ETB
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <span className="font-bold text-lg tracking-wider">{perfume.price.toLocaleString()} ETB</span>
-                )}
-              </div>
+              <span className="font-bold text-lg tracking-wider">
+                {(categorySetting ? getCatalogSizePrice(perfume, categorySetting, selectedSize) : perfume.price).toLocaleString()} ETB
+              </span>
 
               <button className="
           w-12 
@@ -241,7 +290,7 @@ export default function PerfumeDetailsModal({ perfume, onClose }: PerfumeDetails
             <h3 className="text-2xl luxury-text font-semibold mb-6 text-gray-900 border-b border-gray-100 pb-2">Main Accords</h3>
             <div className="space-y-4">
               {perfume.accords.map((accord, idx) => {
-                const barColor = colors[accord.name] || accord.color || '#cccccc';
+                const barColor = accord.customColor || colors[accord.name] || accord.color || '#cccccc';
                 return (
                   <motion.div
                     key={idx}

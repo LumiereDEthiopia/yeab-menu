@@ -44,11 +44,10 @@ export default function TopTabs({ activeGender, setActiveGender }: TopTabsProps)
                 transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
               />
             )}
-            <span className="relative z-10">{tab}</span>
+            <span className="relative z-10">{tab === 'All' ? 'All Genders' : tab}</span>
           </button>
         );
       })}
     </div>
   );
 }
-

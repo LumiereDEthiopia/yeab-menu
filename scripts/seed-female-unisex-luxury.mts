@@ -1,23 +1,17 @@
 // Seeds the Female + Unisex perfumes from the app catalog (src/lib/data.ts) into the
-// local SQLite database and replaces legacy SVG placeholder bottles with the uploaded
+// PostgreSQL database and replaces legacy SVG placeholder bottles with the uploaded
 // Lumier bottle photos:
 //   Female  -> pink.jpg / purple.jpg
 //   Unisex  -> normal.jpg (clear) / tan.jpg (gold) / green.jpg
 //   Luxury  -> luxury-red.jpg / luxury-black.jpg
 // Run with: npm run seed
-import { DatabaseSync } from 'node:sqlite';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import 'dotenv/config';
+import { Pool } from 'pg';
 import { MOCK_PERFUMES, PERFUME_IMAGES } from '../src/lib/data';
 
-const dataDir = process.env.LUMIERE_DATA_DIR
-  || (process.env.LOCALAPPDATA
-    ? join(process.env.LOCALAPPDATA, 'LumiereMenu')
-    : join(homedir(), '.lumiere-menu'));
-const dbPath = join(dataDir, 'perfumes.db');
-if (!existsSync(dbPath)) { console.error('DB NOT FOUND: ' + dbPath); process.exit(1); }
-const db = new DatabaseSync(dbPath);
+const databaseUrl = process.env.DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('Set DATABASE_URL before seeding the catalog.');
+const db = new Pool({ connectionString: databaseUrl });
 
 // Same hash as src/lib/data.ts so DB images match what the UI fallback would show
 function bottleIndexFromCode(code: string, count: number): number {
@@ -43,19 +37,19 @@ function pickImage(gender: string, category: string, code: string): string {
 const summary: string[] = [];
 
 // --- 1) Seed Female + Unisex perfumes from the catalog data ---
-const UPSERT_UPDATE = `UPDATE perfumes SET
-  code=@code, name=@name, brand=@brand, price=@price, gender=@gender, category=@category,
-  stockStatus=@stockStatus, description=@description, rating=@rating, mainImage=@mainImage,
-  miniImage=@miniImage, galleryImages=@galleryImages, accords=@accords,
-  fragranceProfile=@fragranceProfile, dayNight=@dayNight, seasons=@seasons, notes=@notes
-  WHERE id=@id`;
-const UPSERT_INSERT = `INSERT INTO perfumes (
+const UPSERT = `INSERT INTO perfumes (
   id, code, name, brand, price, gender, category, stockStatus, description, rating,
   mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
 ) VALUES (
-  @id, @code, @name, @brand, @price, @gender, @category, @stockStatus, @description, @rating,
-  @mainImage, @miniImage, @galleryImages, @accords, @fragranceProfile, @dayNight, @seasons, @notes
-)`;
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+  $11, $12, $13, $14, $15, $16, $17, $18
+)
+ON CONFLICT (id) DO UPDATE SET
+  code=EXCLUDED.code, name=EXCLUDED.name, brand=EXCLUDED.brand, price=EXCLUDED.price,
+  gender=EXCLUDED.gender, category=EXCLUDED.category, stockstatus=EXCLUDED.stockstatus,
+  description=EXCLUDED.description, rating=EXCLUDED.rating, mainimage=EXCLUDED.mainimage,
+  miniimage=EXCLUDED.miniimage, galleryimages=EXCLUDED.galleryimages, accords=EXCLUDED.accords,
+  fragranceprofile=EXCLUDED.fragranceprofile, daynight=EXCLUDED.daynight, seasons=EXCLUDED.seasons, notes=EXCLUDED.notes`;
 
 let inserted = 0;
 let updated = 0;
@@ -81,34 +75,41 @@ for (const p of MOCK_PERFUMES) {
     seasons: JSON.stringify(p.seasons || []),
     notes: JSON.stringify(p.notes || {}),
   };
-  const exists = db.prepare('SELECT id FROM perfumes WHERE id = ?').get(p.id);
-  if (exists) { db.prepare(UPSERT_UPDATE).run(vals); updated++; }
-  else { db.prepare(UPSERT_INSERT).run(vals); inserted++; }
+  const values = [
+    vals.id, vals.code, vals.name, vals.brand, vals.price, vals.gender, vals.category,
+    vals.stockStatus, vals.description, vals.rating, vals.mainImage, vals.miniImage,
+    vals.galleryImages, vals.accords, vals.fragranceProfile, vals.dayNight, vals.seasons, vals.notes,
+  ];
+  const exists = (await db.query('SELECT id FROM perfumes WHERE id = $1', [p.id])).rowCount;
+  await db.query(UPSERT, values);
+  if (exists) updated++;
+  else inserted++;
   summary.push(`${p.code} | ${p.name} | ${p.gender} | ${p.category} | ${p.mainImage} | ${exists ? 'updated' : 'inserted'}`);
 }
 
 // --- 2) Replace legacy lumier-*.svg placeholders on existing records ---
-const legacy = db.prepare(
-  "SELECT id, code, gender, category, mainImage, miniImage, galleryImages FROM perfumes WHERE mainImage LIKE '/images/perfumes/lumier-%.svg'"
-).all() as any[];
+const legacy = (await db.query(
+  "SELECT id, code, gender, category, mainimage, miniimage, galleryimages FROM perfumes WHERE mainimage LIKE '/images/perfumes/lumier-%.svg'"
+)).rows as any[];
 for (const row of legacy) {
   const nextImage = pickImage(row.gender || 'Male', row.category || 'Brand Perfume', row.code || row.id);
-  const nextMini = (!row.miniImage || row.miniImage === row.mainImage) ? nextImage : row.miniImage;
-  let nextGallery = row.galleryImages;
+  const nextMini = (!row.miniimage || row.miniimage === row.mainimage) ? nextImage : row.miniimage;
+  let nextGallery = row.galleryimages;
   try {
-    const gal = JSON.parse(row.galleryImages || '[]');
+    const gal = JSON.parse(row.galleryimages || '[]');
     if (Array.isArray(gal)) {
-      const replaced = gal.map((g: string) => (g === row.mainImage ? nextImage : g));
+      const replaced = gal.map((g: string) => (g === row.mainimage ? nextImage : g));
       nextGallery = JSON.stringify(replaced.length ? replaced : [nextImage]);
     }
   } catch { nextGallery = JSON.stringify([nextImage]); }
-  db.prepare('UPDATE perfumes SET mainImage = ?, miniImage = ?, galleryImages = ? WHERE id = ?')
-    .run(nextImage, nextMini, nextGallery, row.id);
+  await db.query('UPDATE perfumes SET mainimage = $1, miniimage = $2, galleryimages = $3 WHERE id = $4',
+    [nextImage, nextMini, nextGallery, row.id]);
   summary.push(`${row.code || row.id} | legacy svg -> ${nextImage}`);
 }
 
 console.log(summary.join('\n'));
 console.log(`Female/Unisex records inserted: ${inserted}, updated: ${updated}`);
 console.log(`Legacy SVG placeholders replaced: ${legacy.length}`);
-const total = db.prepare('SELECT COUNT(*) c FROM perfumes').get() as { c: number };
+const total = (await db.query('SELECT COUNT(*) AS c FROM perfumes')).rows[0] as { c: string };
 console.log('TOTAL in DB: ' + total.c);
+await db.end();

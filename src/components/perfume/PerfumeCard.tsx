@@ -1,5 +1,5 @@
 import React from 'react';
-import { getPerfumeSizePrices, getPerfumeStartingPrice, Perfume } from '../../lib/data';
+import { Perfume } from '../../lib/data';
 import { useAccordColors, useCatalogImages, resolveCatalogImage } from '../../lib/api';
 import { motion } from 'motion/react';
 import { Star } from 'lucide-react';
@@ -39,7 +39,7 @@ export const PerfumeCard: React.FC<PerfumeCardProps> = ({ perfume, onClick }) =>
         {/* Hover mini-accords preview */}
         <div className="absolute bottom-4 left-4 right-4 z-20 flex flex-col gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-300 transform translate-y-2 group-hover:translate-y-0 transition-transform duration-500">
            {perfume.accords.slice(0, 3).map((accord, idx) => {
-             const barColor = colors[accord.name] || accord.color || '#cccccc';
+             const barColor = accord.customColor || colors[accord.name] || accord.color || '#cccccc';
              return (
                <div key={idx} className="h-1.5 w-full bg-white/20 rounded-full overflow-hidden backdrop-blur-sm">
                  <motion.div 
@@ -83,8 +83,7 @@ export const PerfumeCard: React.FC<PerfumeCardProps> = ({ perfume, onClick }) =>
 
           <div className="text-right">
             <span className="text-sm border-b border-gray-300 pb-0.5 text-gray-900 font-bold tracking-wide">
-              {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
-              {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
+              {perfume.price.toLocaleString()} ETB
             </span>
           </div>
         </div>

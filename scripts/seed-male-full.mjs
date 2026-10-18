@@ -1,16 +1,12 @@
-import { DatabaseSync } from 'node:sqlite';
+import 'dotenv/config';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { Pool } from 'pg';
 
-const dataDir = process.env.LUMIERE_DATA_DIR
-  || (process.env.LOCALAPPDATA
-    ? join(process.env.LOCALAPPDATA, 'LumiereMenu')
-    : join(homedir(), '.lumiere-menu'));
-const dbPath = join(dataDir, 'perfumes.db');
-if (!existsSync(dbPath)) { console.error('DB NOT FOUND: ' + dbPath); process.exit(1); }
-const db = new DatabaseSync(dbPath);
+const databaseUrl = process.env.DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('Set DATABASE_URL before seeding the catalog.');
+const db = new Pool({ connectionString: databaseUrl });
 const catalogPath = fileURLToPath(new URL('./catalog-m.txt', import.meta.url));
 const lines = readFileSync(catalogPath, 'utf8').split(/\r?\n/).map(l => l.trim());
 // --- parse entries ---
@@ -25,7 +21,7 @@ if (cur) entries.push(cur);
 console.log('parsed entries: ' + entries.length + ' [' + entries.map(e => e.code).join(',') + ']');
 if (!entries.length) process.exit(2);
 // --- mirror m01 conventions ---
-const m01 = db.prepare("SELECT * FROM perfumes WHERE id='m01'").get();
+const m01 = (await db.query("SELECT * FROM perfumes WHERE id='m01'")).rows[0];
 let noteKind = 's', nameKey = 'name', iconKey = null;
 const iconMap = {};
 if (m01) {
@@ -53,7 +49,7 @@ try {
 for (let k = 0; k < entries.length; k++) {
   const e = entries[k];
   const id = e.code.toLowerCase();
-  if (id === 'm01' && db.prepare("SELECT id FROM perfumes WHERE id='m01'").get()) { summary.push('M01 | SKIPPED (existing record kept)'); continue; }
+  if (id === 'm01' && (await db.query("SELECT id FROM perfumes WHERE id='m01'")).rowCount) { summary.push('M01 | SKIPPED (existing record kept)'); continue; }
   const parts = e.rest.split(/\s+[-\u2013\u2014]\s+/);
   const name = (parts.length > 1 ? parts.slice(0, -1).join(' - ') : parts[0]).trim() || e.code;
   const house = parts.length > 1 ? parts[parts.length-1].trim() : 'Lumier';
@@ -82,12 +78,23 @@ for (let k = 0; k < entries.length; k++) {
     fragranceProfile: JSON.stringify({ longevity: longevity || '8-10 hours', projection: projection || 'Strong', sillage: sillage || 'Enormous' }),
     dayNight: dn, seasons: JSON.stringify(seasons),
     notes: JSON.stringify({ top: top.map(mkNote), middle: mid.map(mkNote), base: base.map(mkNote) }) };
-  const exists = db.prepare('SELECT id FROM perfumes WHERE id = ?').get(id);
-  if (exists) db.prepare('UPDATE perfumes SET name=@name,code=@code,brand=@brand,price=@price,gender=@gender,category=@category,stockStatus=@stockStatus,description=@description,rating=@rating,mainImage=@mainImage,miniImage=@miniImage,galleryImages=@galleryImages,accords=@accords,fragranceProfile=@fragranceProfile,dayNight=@dayNight,seasons=@seasons,notes=@notes WHERE id=@id').run(vals);
-  else db.prepare('INSERT INTO perfumes (id,name,code,brand,price,gender,category,stockStatus,description,rating,mainImage,miniImage,galleryImages,accords,fragranceProfile,dayNight,seasons,notes) VALUES (@id,@name,@code,@brand,@price,@gender,@category,@stockStatus,@description,@rating,@mainImage,@miniImage,@galleryImages,@accords,@fragranceProfile,@dayNight,@seasons,@notes)').run(vals);
+  const exists = (await db.query('SELECT id FROM perfumes WHERE id = $1', [id])).rowCount;
+  await db.query(`
+    INSERT INTO perfumes (id,name,code,brand,price,gender,category,stockstatus,description,rating,mainimage,miniimage,galleryimages,accords,fragranceprofile,daynight,seasons,notes)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    ON CONFLICT (id) DO UPDATE SET
+      name=EXCLUDED.name,code=EXCLUDED.code,brand=EXCLUDED.brand,price=EXCLUDED.price,
+      gender=EXCLUDED.gender,category=EXCLUDED.category,stockstatus=EXCLUDED.stockstatus,
+      description=EXCLUDED.description,rating=EXCLUDED.rating,mainimage=EXCLUDED.mainimage,
+      miniimage=EXCLUDED.miniimage,galleryimages=EXCLUDED.galleryimages,accords=EXCLUDED.accords,
+      fragranceprofile=EXCLUDED.fragranceprofile,daynight=EXCLUDED.daynight,seasons=EXCLUDED.seasons,notes=EXCLUDED.notes
+  `, [vals.id, vals.name, vals.code, vals.brand, vals.price, vals.gender, vals.category, vals.stockStatus,
+    vals.description, vals.rating, vals.mainImage, vals.miniImage, vals.galleryImages, vals.accords,
+    vals.fragranceProfile, vals.dayNight, vals.seasons, vals.notes]);
   summary.push(e.code + ' | ' + name + ' | acc:' + accords.length + ' | ' + (longevity||'?') + '/' + (sillage||'?') + ' | ' + dn + ' | seasons:' + seasons.length + ' | notes:' + top.length + '/' + mid.length + '/' + base.length + ' | ' + (exists ? 'updated' : 'inserted'));
 }
 } catch (err) { console.error('ERROR: ' + err.message); process.exit(3); }
 console.log(summary.join('\n'));
-const total = db.prepare('SELECT COUNT(*) c FROM perfumes').get().c;
+const total = (await db.query('SELECT COUNT(*) AS c FROM perfumes')).rows[0].c;
 console.log('TOTAL in DB: ' + total);
+await db.end();

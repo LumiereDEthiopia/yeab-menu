@@ -52,28 +52,48 @@ After a successful import a report banner appears:
 
 ## Column reference
 
-The sheet name is **`Perfumes`** (any first worksheet is accepted on import, and
-headers are matched case-insensitively). Lists are separated by ` | `.
+The sheet name is **`products`** (the first worksheet is also accepted on
+import), and headers are matched case-insensitively. The import accepts the
+provided `products-export` workbook columns. Lists are separated by ` | `.
 
 | Column | Required? | Format / allowed values | Example |
 | --- | --- | --- | --- |
 | `id` | No | Existing product id | `1731948…` |
 | `name` | **Yes for new rows** | Free text | `Amber Noir` |
 | `code` | Recommended | Free text; unique key | `P1234` |
+| `productType` | No | `PERFUME`, `OIL`, or `PURE_OIL` | `PERFUME` |
 | `brand` | No | Free text | `Our Fragrance` |
 | `price` | No | Number (`,` and spaces allowed) | `2,500` |
 | `gender` | No | `Male` `Female` `Kids` `Unisex` | `Unisex` |
-| `category` | No | `Perfume` `Brand Perfume` `Luxury Perfume` | `Perfume` |
-| `stockStatus` | No | `In Stock` `Low Stock` `Out Stock` | `In Stock` |
+| `category` | No | A configured category or workbook alias (`Men`, `Women`, `Unisex`, `Kids`) | `Perfume` |
+| `stockStatus` | No | Default status: `In Stock`, `Low Stock`, `Out Stock`, or `Out of Stock` | `In Stock` |
+| `stockStatus1` / `stockStatus2` | No | Optional status for the category's first / second configured size; blank uses `stockStatus` | `Low Stock` |
 | `description` | No | Free text | `A warm amber fragrance…` |
 | `rating` | No | Number 0–5 | `4.5` |
-| `accords` | No | `Name:strength` pairs | `Amber:80 \| Woody:65` |
+| `accords` | No | `Name:strength` pairs, optionally followed by a custom six-digit hex color | `Amber:80:#d99e4c \| Woody:65:#a16207` |
 | `fragranceProfile` | No | `key=value` pairs (`longevity`, `projection`, `sillage`) | `longevity=8H \| projection=Moderate` |
 | `dayNight` | No | `Day` `Night` `Both` | `Both` |
 | `seasons` | No | `Winter` `Spring` `Summer` `Autumn` | `Autumn \| Winter` |
 | `notes.top` | No | Note names | `Bergamot \| Pink Pepper` |
 | `notes.middle` | No | Note names | `Rose` |
 | `notes.base` | No | Note names | `Sandalwood \| Vanilla` |
+| `pricePerGram` | No | Non-negative ETB price per gram; multiplied by the selected gram size | `25` |
+| `unit` | No | `ml` or `gram`; if blank, the category unit is used | `ml` |
+| `sizePrice1` | No | ETB price for the category's first configured size when unit is `ml` | `2500` |
+| `sizePrice2` | No | ETB price for the category's second configured size when unit is `ml` | `4500` |
+
+For compatibility with the provided file, category values `Men`, `Women`,
+`Unisex`, and `Kids` map to the Regular (`Perfume`) catalog category. A
+`productType` of `OIL` maps to the Oil category, and `PURE_OIL` maps to 3ml Oil
+(the product type takes precedence over category). Brand Perfume, Luxury
+Perfume, and other configured category names map directly.
+Export uses the same `products` worksheet and provided column order, then
+appends `pricePerGram`, `unit`, `sizePrice1`, and `sizePrice2` to retain
+gram-based rates and product-specific unit/pricing. `stockStatus1` and
+`stockStatus2` hold independent statuses for the first and second configured
+sizes, while blank values inherit the product's default `stockStatus`. Size
+amounts are managed in Admin category settings; a product's unit and prices do
+not change other products in that category.
 
 > **Golden rule:** an empty cell means *"keep the current value"*. Only filled
 > cells are applied, so a partially filled sheet is always safe to import.
@@ -148,7 +168,9 @@ The spreadsheet carries **no image columns at all**. Images are handled separate
 | Situation | Behavior |
 | --- | --- |
 | Enum value in the wrong case (`male`, `IN STOCK`) | Accepted — matching is case-insensitive |
-| Unknown `gender` / `category` / `stockStatus` / `dayNight` | Falls back to the default (`Unisex` / `Perfume` / `In Stock` / `Both`) |
+| Unknown `gender` / `stockStatus` / `dayNight` | Falls back to the default (`Unisex` / `In Stock` / `Both`) |
+| Unknown `category` | **Row skipped** with an error; create the category in Admin > Catalog Images first |
+| `Out of Stock` stock label | Accepted and stored as the app's `Out Stock` value |
 | Unknown season name in `seasons` | Silently dropped from the list |
 | `price` with commas/spaces (`2,500`) | Accepted — cleaned then rounded to an integer |
 | `price` not a number (`abc`) | **Row skipped**, error `Price "abc" is not a valid number` |
@@ -220,7 +242,7 @@ reason it was skipped.
 | `The spreadsheet has no "name" column — download the template for the exact format.` | Missing required header |
 
 ### Transaction semantics
-All rows are processed inside a **single SQLite transaction**: individual bad
+All rows are processed inside a **single PostgreSQL transaction**: individual bad
 rows are skipped and reported, while an unexpected failure rolls the whole file
 back — the database is never left half-imported.
 
@@ -245,11 +267,9 @@ back — the database is never left half-imported.
 
 | Concern | Location |
 | --- | --- |
-| Column definitions, enum lists, defaults | `server.ts` — `EXCEL_COLUMNS`, `EXCEL_GENDERS`, `EXCEL_CATEGORIES`, … |
+| Column definitions, enums, defaults | `server.ts` — `EXCEL_COLUMNS`, `EXCEL_GENDERS`, stock/day-night enums; categories are loaded from category settings |
 | Export endpoint | `server.ts` — `GET /api/admin/perfumes/export` |
 | Template generation | `server.ts` — `buildImportTemplateWorkbook()` |
 | Import endpoint (parsing, matching, upsert, report) | `server.ts` — `POST /api/admin/perfumes/import` |
 | Admin UI (buttons, file validation, report banner) | `src/pages/AdminPage.tsx` — Excel Import & Export card |
 | XLSX engine | [`exceljs`](https://github.com/exceljs/exceljs) |
-
-

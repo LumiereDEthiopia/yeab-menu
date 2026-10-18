@@ -1,5 +1,5 @@
 import React from 'react';
-import { getPerfumeSizePrices, getPerfumeStartingPrice, Perfume } from '../../lib/data';
+import { Perfume } from '../../lib/data';
 import { useAccordColors, useCatalogImages, resolveCatalogImage } from '../../lib/api';
 import { motion } from 'motion/react';
 import { Star, Hourglass, Wind, Sun, Moon, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -34,7 +34,7 @@ export default function PerfumeSlide({ perfume, onNext, onPrev }: PerfumeSlidePr
              <h4 className="text-sm text-[#333] mb-2 font-medium">main accords</h4>
              <div className="flex flex-col gap-2">
                 {perfume.accords.slice(0, 5).map((accord, idx) => {
-                  const barColor = colors[accord.name] || accord.color || '#8b4513';
+                  const barColor = accord.customColor || colors[accord.name] || accord.color || '#8b4513';
                   return (
                     <div key={idx} className="relative h-6 w-full bg-white flex items-center">
                       <motion.div 
@@ -127,8 +127,7 @@ export default function PerfumeSlide({ perfume, onNext, onPrev }: PerfumeSlidePr
                 Price
               </div>
               <div className="px-4 py-2 text-sm font-bold text-black flex items-center justify-center min-w-[100px]">
-                {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
-                {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
+                {perfume.price} ETB
               </div>
            </div>
            

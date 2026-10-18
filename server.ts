@@ -2,12 +2,12 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
-import { DatabaseSync } from 'node:sqlite';
+import { Pool } from 'pg';
 import jwt from 'jsonwebtoken';
 import os from 'os';
 import ExcelJS from 'exceljs';
 import type { Workbook } from 'exceljs';
-import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
+import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto';
 import dotenv from 'dotenv';
 
 // Load a local .env file before any variable below is read, so `npm run dev`
@@ -19,11 +19,10 @@ import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
 // --- Environment configuration -------------------------------------------------
-// Configuration is deliberately forgiving: the server always boots, and a
-// missing or weak secret is reported as a loud warning instead of a fatal
-// error. A hard failure here takes the whole app down and — on Railway —
-// burns the restart budget in a crash loop, which is a much worse outcome than
-// a trade-off the operator has knowingly accepted.
+// Authentication configuration is deliberately forgiving: a missing or weak
+// secret is reported as a loud warning instead of a fatal error. Database
+// configuration is required separately because the application cannot serve
+// catalog data without PostgreSQL.
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const IS_PRODUCTION = NODE_ENV === 'production';
 
@@ -78,10 +77,8 @@ const KNOWN_PUBLIC_SECRETS = new Set([
 const normalizedSecret = JWT_SECRET.trim().replace(/[.!?,;:'"()[\]]+$/, '').toLowerCase();
 
 // --- Startup security report ---------------------------------------------------
-// Nothing below stops the server from booting. The point is to make the
-// trade-off visible in the deploy logs instead of silently shipping a
-// wide-open admin panel, so whoever operates this can see exactly what is
-// exposed and upgrade later without having to read the source.
+// Authentication warnings make risky defaults visible in deployment logs
+// instead of silently shipping a wide-open admin panel.
 if (IS_PRODUCTION) {
   const warnings: string[] = [];
 
@@ -135,93 +132,59 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 }
 
 const normalizeStockStatus = (status?: string) => status === 'Low Stock' || status === 'Out Stock' ? status : 'In Stock';
+const isValidStockStatus = (status: unknown): status is 'In Stock' | 'Low Stock' | 'Out Stock' =>
+  status === 'In Stock' || status === 'Low Stock' || status === 'Out Stock';
 
-// --- Data directory (SQLite DB + backups) --------------------------------------
-// All data (perfumes and their uploaded images, which live inside the DB) is
-// stored outside the project folder so OneDrive doesn't sync it: on Windows
-// that's %LOCALAPPDATA%\LumiereMenu, everywhere else ~/.lumiere-menu.
-// Override with LUMIERE_DATA_DIR — in production this MUST point at persistent
-// storage (Railway: mount a Volume at /data and set LUMIERE_DATA_DIR=/data).
-function resolveDataDir(): string {
-  if (process.env.LUMIERE_DATA_DIR && process.env.LUMIERE_DATA_DIR.trim().length > 0) {
-    return process.env.LUMIERE_DATA_DIR.trim();
-  }
-  if (IS_PRODUCTION) {
-    // Warn rather than exit: refusing to boot does not make the data any safer,
-    // it just means there is no app to restore from. The Dockerfile already sets
-    // /data, so this only fires on a hand-rolled start command.
-    console.warn(
-      '[config] WARNING: LUMIERE_DATA_DIR is not set. The SQLite database is falling back to the\n' +
-        '          container filesystem, which is EPHEMERAL on Railway — the catalog is deleted on every\n' +
-        '          redeploy. To fix: Volumes -> + New Volume, mount at /data, then set LUMIERE_DATA_DIR=/data.'
-    );
-  }
-  return process.env.LOCALAPPDATA
-    ? path.join(process.env.LOCALAPPDATA, 'LumiereMenu')
-    : path.join(os.homedir(), '.lumiere-menu');
+const DATABASE_URL = process.env.DATABASE_URL?.trim();
+if (!DATABASE_URL) {
+  throw new Error('DATABASE_URL is required. Configure it in .env locally or your hosting provider.');
 }
+const pool = new Pool({ connectionString: DATABASE_URL });
 
-const DATA_DIR = resolveDataDir();
-const DB_PATH = path.join(DATA_DIR, 'perfumes.db');
-// Optional off-volume backup location (e.g. a second mounted volume or network
-// share). Defaults to <DATA_DIR>/backups when unset. Keeping backups off the
-// primary volume protects the data even if the main volume is lost.
-const BACKUP_DIR = (process.env.LUMIERE_BACKUP_DIR && process.env.LUMIERE_BACKUP_DIR.trim().length > 0)
-  ? process.env.LUMIERE_BACKUP_DIR.trim()
-  : path.join(DATA_DIR, 'backups');
-const LEGACY_DB = path.join(process.cwd(), 'perfumes.db'); // old location inside the OneDrive project folder
-
-fs.mkdirSync(DATA_DIR, { recursive: true });
-try {
-  fs.accessSync(DATA_DIR, fs.constants.W_OK);
-} catch {
-  console.error(`[config] FATAL: data directory is not writable: ${DATA_DIR}`);
-  process.exit(1);
-}
-
-/**
- * Consistent snapshot of the database file. A plain file copy is safe because
- * the server runs with SQLite's default rollback journal and FULL sync, so the
- * .db file on disk is always current (there is no WAL sidecar to checkpoint).
- */
-function backupDatabaseFile(label: string): string | null {
-  if (!fs.existsSync(DB_PATH)) return null;
-  try {
-    fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const target = path.join(BACKUP_DIR, `${label}-${stamp}.db`);
-    fs.copyFileSync(DB_PATH, target);
-    console.log(`[data] Backup saved: ${target}`);
-    return target;
-  } catch (e) {
-    console.error('[data] Backup failed:', e);
-    return null;
-  }
-}
-
-const countPerfumesIn = (file: string): number => {
-  try {
-    const handle = new DatabaseSync(file);
-    const row = handle.prepare('SELECT count(*) AS c FROM perfumes').get() as { c: number } | undefined;
-    handle.close();
-    return row?.c ?? 0;
-  } catch {
-    return 0;
-  }
+const DATABASE_COLUMN_NAMES: Record<string, string> = {
+  sizeprice1: 'sizePrice1',
+  sizeprice2: 'sizePrice2',
+  pricepergram: 'pricePerGram',
+  sizeimage1: 'sizeImage1',
+  sizeimage2: 'sizeImage2',
+  stockstatus: 'stockStatus',
+  stockstatus1: 'stockStatus1',
+  stockstatus2: 'stockStatus2',
+  mainimage: 'mainImage',
+  miniimage: 'miniImage',
+  galleryimages: 'galleryImages',
+  fragranceprofile: 'fragranceProfile',
+  daynight: 'dayNight',
 };
-
-try {
-  const legacyCount = fs.existsSync(LEGACY_DB) ? countPerfumesIn(LEGACY_DB) : 0;
-  const localCount = fs.existsSync(DB_PATH) ? countPerfumesIn(DB_PATH) : 0;
-  if (legacyCount > 0 && localCount <= 0) {
-    fs.copyFileSync(LEGACY_DB, DB_PATH);
-    console.log(`Adopted existing database (${legacyCount} perfumes) from project folder into local storage.`);
-  } else if (legacyCount > 0 && localCount > 0) {
-    console.log(`Note: old OneDrive database has ${legacyCount} perfumes; using local database (${localCount} perfumes) at ${DB_PATH}.`);
-  }
-} catch (e) {
-  console.error('Legacy database check failed:', e);
-}
+const normalizeDatabaseRow = <T extends Record<string, unknown>>(row: T): T =>
+  Object.fromEntries(Object.entries(row).map(([key, value]) => [
+    DATABASE_COLUMN_NAMES[key] ?? key,
+    value,
+  ])) as T;
+const toPostgresPlaceholders = (sql: string): string => {
+  let index = 0;
+  return sql.replace(/\?/g, () => `$${++index}`);
+};
+const db = {
+  async query(sql: string, values?: unknown[]) {
+    const result = await pool.query(toPostgresPlaceholders(sql), values);
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
+    return { ...result, rows: rows.map(normalizeDatabaseRow) };
+  },
+  prepare(sql: string) {
+    return {
+      all: async (...values: unknown[]) => (await db.query(sql, values)).rows,
+      get: async (...values: unknown[]) => (await db.query(sql, values)).rows[0],
+      run: async (...values: unknown[]) => db.query(sql, values),
+    };
+  },
+  async exec(sql: string) {
+    return pool.query(sql);
+  },
+  async close() {
+    await pool.end();
+  },
+};
 
 async function startServer() {
   const app = express();
@@ -273,35 +236,24 @@ async function startServer() {
   };
   const clearLoginFailures = (ip: string) => loginFailures.delete(ip);
 
-  // Initialize SQLite database (LOCAL storage, outside OneDrive sync)
-  const db = new DatabaseSync(DB_PATH);
-  console.log(`Local data folder (not OneDrive-synced): ${DATA_DIR}`);
-  console.log(`[data] Database file: ${DB_PATH}`);
-  if (IS_PRODUCTION) {
-    console.log('[data] WARNING: this path must be a MOUNTED VOLUME (Railway: Service → Volumes → /data). It is the only thing that survives redeploys — confirm it is NOT the container\'s ephemeral filesystem.');
-  }
-
-  // Wait up to 5s for a separate process's lock (e.g. a backup) instead of
-  // failing immediately with "database is locked".
-  db.exec('PRAGMA busy_timeout = 5000;');
-
-  // Pre-boot safety snapshot: if a database already exists, snapshot it BEFORE
-  // today's automatic schema migrations run, so every upgrade has a rollback point.
-  backupDatabaseFile('perfumes-pre-boot');
-
-  // Create tables if they don't exist
-  db.exec(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS perfumes (
       id TEXT PRIMARY KEY,
       name TEXT,
       code TEXT,
       brand TEXT,
-      price INTEGER,
-      sizeUnit TEXT DEFAULT 'ml',
-      sizePrices TEXT DEFAULT '[]',
+      price DOUBLE PRECISION,
+      unit TEXT,
+      sizePrice1 DOUBLE PRECISION,
+      sizePrice2 DOUBLE PRECISION,
+      pricePerGram DOUBLE PRECISION,
+      sizeImage1 TEXT,
+      sizeImage2 TEXT,
       gender TEXT,
       category TEXT,
       stockStatus TEXT DEFAULT 'In Stock',
+      stockStatus1 TEXT,
+      stockStatus2 TEXT,
       description TEXT,
       rating REAL,
       mainImage TEXT,
@@ -312,7 +264,7 @@ async function startServer() {
       dayNight TEXT,
       seasons TEXT,
       notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS accord_colors (
@@ -325,32 +277,51 @@ async function startServer() {
       gender TEXT NOT NULL,
       category TEXT NOT NULL,
       image TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_catalog_images_bucket ON catalog_images (gender, category);
+
+    CREATE TABLE IF NOT EXISTS catalog_size_images (
+      gender TEXT NOT NULL,
+      category TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK (size IN (1, 2)),
+      image TEXT NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (gender, category, size)
+    );
+
+    CREATE TABLE IF NOT EXISTS category_settings (
+      category TEXT PRIMARY KEY,
+      unit TEXT NOT NULL DEFAULT 'ml',
+      size1 TEXT NOT NULL DEFAULT '50',
+      size2 TEXT NOT NULL DEFAULT '100',
+      price1 DOUBLE PRECISION NOT NULL DEFAULT 0,
+      price2 DOUBLE PRECISION NOT NULL DEFAULT 0,
+      image1 TEXT,
+      image2 TEXT,
+      options_json TEXT
+    );
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS stockStatus TEXT DEFAULT 'In Stock';
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS stockStatus1 TEXT;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS stockStatus2 TEXT;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS miniImage TEXT;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS pricePerGram DOUBLE PRECISION;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS unit TEXT;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS sizePrice1 DOUBLE PRECISION;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS sizePrice2 DOUBLE PRECISION;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS sizeImage1 TEXT;
+    ALTER TABLE perfumes ADD COLUMN IF NOT EXISTS sizeImage2 TEXT;
+    ALTER TABLE category_settings ADD COLUMN IF NOT EXISTS price1 DOUBLE PRECISION NOT NULL DEFAULT 0;
+    ALTER TABLE category_settings ADD COLUMN IF NOT EXISTS price2 DOUBLE PRECISION NOT NULL DEFAULT 0;
+    ALTER TABLE category_settings ADD COLUMN IF NOT EXISTS options_json TEXT;
   `);
 
-  const perfumeColumns = db.prepare('PRAGMA table_info(perfumes)').all() as { name: string }[];
-  if (!perfumeColumns.some(column => column.name === 'stockStatus')) {
-    db.exec("ALTER TABLE perfumes ADD COLUMN stockStatus TEXT DEFAULT 'In Stock'");
-  }
-  if (!perfumeColumns.some(column => column.name === 'miniImage')) {
-    db.exec('ALTER TABLE perfumes ADD COLUMN miniImage TEXT');
-  }
-  if (!perfumeColumns.some(column => column.name === 'sizeUnit')) {
-    db.exec("ALTER TABLE perfumes ADD COLUMN sizeUnit TEXT DEFAULT 'ml'");
-  }
-  if (!perfumeColumns.some(column => column.name === 'sizePrices')) {
-    db.exec("ALTER TABLE perfumes ADD COLUMN sizePrices TEXT DEFAULT '[]'");
-  }
-
   // Backfill: ensure every perfume has a stored mini image (defaults to its main image)
-  db.prepare("UPDATE perfumes SET miniImage = mainImage WHERE miniImage IS NULL OR miniImage = ''").run();
+  await db.query('UPDATE perfumes SET miniImage = mainImage WHERE miniImage IS NULL OR miniImage = \'\'');
 
   // --- Catalog image library -----------------------------------------------------
-  // Admins can upload any number of images per Gender × Category bucket
-  // (Male/Female/Kids/Unisex × Perfume/Brand Perfume/Luxury Perfume). The
-  // catalog uses these images in two ways:
+  // Admins can upload any number of images per Gender × configured Category
+  // bucket. The catalog uses these images in two ways:
   //   1. products created without their own photo (admin form or Excel import)
   //      pick one from the matching bucket, and
   //   2. the catalog UI substitutes a bucket image for products that still show
@@ -358,9 +329,28 @@ async function startServer() {
   // A custom uploaded/pasted image on a product always wins over the library.
 
   const CATALOG_IMAGE_GENDERS = ['Male', 'Female', 'Kids', 'Unisex'];
-  const CATALOG_IMAGE_CATEGORIES = ['Perfume', 'Brand Perfume', 'Luxury Perfume'];
   const PLACEHOLDER_IMAGE_PREFIX = '/images/perfumes/';
   const FALLBACK_BOTTLE_IMAGE = '/images/perfumes/normal.jpg';
+
+  // --- Category size settings ----------------------------------------------------
+  // Every category has two sizes, prices, and optional photos. Rows are seeded
+  // once with defaults; ON CONFLICT DO NOTHING
+  // keeps any values the admin has already edited in later boots.
+  const CATEGORY_SIZE_DEFAULTS: [category: string, unit: string, size1: string, size2: string][] = [
+    ['Perfume', 'ml', '50', '100'],
+    ['Brand Perfume', 'ml', '50', '100'],
+    ['Luxury Perfume', 'ml', '50', '100'],
+    ['Oil', 'ml', '3', '6'],
+    ['Musk', 'gram', '6', '12'],
+    ['3ml Oil', 'ml', '3', '6'],
+    ['Cream/Jelly', 'gram', '30', '50'],
+  ];
+  for (const [category, unit, size1, size2] of CATEGORY_SIZE_DEFAULTS) {
+    await db.query(
+      'INSERT INTO category_settings (category, unit, size1, size2, price1, price2) VALUES ($1, $2, $3, $4, 0, 0) ON CONFLICT (category) DO NOTHING',
+      [category, unit, size1, size2]
+    );
+  }
 
   /** True when an image is empty or one of the built-in placeholder bottle photos. */
   const isPlaceholderImage = (image: unknown): boolean =>
@@ -371,34 +361,37 @@ async function startServer() {
     Math.abs(String(seed ?? '').split('').reduce((sum, ch) => sum + ch.charCodeAt(0), 0));
 
   /** Pick an image from the Gender × Category bucket (deterministic per seed code). */
-  const pickCatalogImage = (gender: unknown, category: unknown, seed: unknown): string | null => {
-    try {
-      const rows = db.prepare('SELECT image FROM catalog_images WHERE gender = ? AND category = ? ORDER BY created_at, rowid')
-        .all(String(gender ?? ''), String(category ?? '')) as { image: string }[];
-      const pool = rows.map(row => row.image).filter(img => typeof img === 'string' && img.length > 0);
-      if (pool.length === 0) return null;
-      return pool[hashSeed(seed) % pool.length];
-    } catch {
-      return null;
-    }
+  const pickCatalogImage = async (gender: unknown, category: unknown, seed: unknown): Promise<string | null> => {
+    const rows = (await db.query(
+      'SELECT image FROM catalog_images WHERE gender = $1 AND category = $2 ORDER BY created_at, id',
+      [String(gender ?? ''), String(category ?? '')]
+    )).rows as { image: string }[];
+    const pool = rows.map(row => row.image).filter(img => typeof img === 'string' && img.length > 0);
+    if (pool.length === 0) return null;
+    return pool[hashSeed(seed) % pool.length];
   };
 
-  // Automatic daily database backup (keeps the last 7). Honors LUMIERE_BACKUP_DIR
-  // so the rotation can live on a second, off-volume location.
-  try {
-    fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    const stamp = new Date().toISOString().slice(0, 10);
-    const dailyFile = path.join(BACKUP_DIR, `perfumes-${stamp}.db`);
-    fs.copyFileSync(DB_PATH, dailyFile);
-    const stale = fs.readdirSync(BACKUP_DIR)
-      .filter(f => f.startsWith('perfumes-') && f.endsWith('.db'))
-      .sort()
-      .slice(0, -7);
-    stale.forEach(f => fs.unlinkSync(path.join(BACKUP_DIR, f)));
-    console.log(`[data] Daily backup saved: ${dailyFile}`);
-  } catch (e) {
-    console.error('DB backup failed:', e);
-  }
+  const categoryExists = async (category: unknown): Promise<boolean> =>
+    typeof category === 'string'
+    && Boolean((await db.query('SELECT 1 FROM category_settings WHERE category = $1', [category.trim()])).rowCount);
+
+  const isValidOptionalImage = (image: unknown): boolean => {
+    if (image === null || image === undefined || image === '') return true;
+    if (typeof image !== 'string' || image.length > 12_000_000) return false;
+    return image.startsWith('data:image/')
+      || image.startsWith('/')
+      || image.startsWith('http://')
+      || image.startsWith('https://');
+  };
+
+  const optionalNonNegativePrice = (value: unknown): number | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null || value === '') return null;
+    const price = Number(value);
+    return Number.isFinite(price) && price >= 0 ? price : NaN;
+  };
+
+  console.log('[data] PostgreSQL schema is ready.');
 
   // JWT-based authentication middleware for admin routes
   const authenticateAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -420,7 +413,13 @@ async function startServer() {
   // --- API Routes ---
 
   // Health check for Railway / uptime monitors.
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', async (_req, res) => {
+    try {
+      await pool.query('SELECT 1');
+    } catch (error) {
+      console.error('Database health check failed:', error);
+      return res.status(503).json({ status: 'unavailable', error: 'Database unavailable' });
+    }
     res.json({
       status: 'ok',
       environment: NODE_ENV,
@@ -429,10 +428,10 @@ async function startServer() {
     });
   });
 
-  app.get('/api/accord-colors', (req, res) => {
+  app.get('/api/accord-colors', async (req, res) => {
     try {
       const stmt = db.prepare('SELECT * FROM accord_colors');
-      const rows = stmt.all() as { name: string, color: string }[];
+      const rows = await stmt.all() as { name: string, color: string }[];
       const colors: Record<string, string> = {};
       rows.forEach(row => {
         colors[row.name] = row.color;
@@ -444,11 +443,11 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/accord-colors', authenticateAdmin, (req, res) => {
+  app.post('/api/admin/accord-colors', authenticateAdmin, async (req, res) => {
     try {
       const { name, color } = req.body;
-      const stmt = db.prepare('INSERT OR REPLACE INTO accord_colors (name, color) VALUES (?, ?)');
-      stmt.run(name, color);
+      const stmt = db.prepare('INSERT INTO accord_colors (name, color) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET color = EXCLUDED.color');
+      await stmt.run(name, color);
       res.json({ success: true });
     } catch (e) {
       console.error(e);
@@ -456,14 +455,218 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/admin/accord-colors/:name', authenticateAdmin, (req, res) => {
+  app.delete('/api/admin/accord-colors/:name', authenticateAdmin, async (req, res) => {
     try {
       const stmt = db.prepare('DELETE FROM accord_colors WHERE name = ?');
-      stmt.run(req.params.name);
+      await stmt.run(req.params.name);
       res.json({ success: true });
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: 'Failed to delete accord color' });
+    }
+  });
+
+  app.get('/api/category-settings', async (_req, res) => {
+    try {
+      const rows = await db.prepare(
+        'SELECT category, unit, size1, size2, price1, price2, image1, image2, options_json FROM category_settings ORDER BY lower(category)'
+      ).all() as {
+        category: string;
+        unit: 'ml' | 'gram';
+        size1: string;
+        size2: string;
+        price1: number;
+        price2: number;
+        image1: string | null;
+        image2: string | null;
+        options_json: string | null;
+      }[];
+      res.json(rows.map(({ options_json, ...setting }) => ({
+        ...setting,
+        options: options_json
+          ? JSON.parse(options_json)
+          : [
+              { size: setting.size1, price: setting.price1, image: setting.image1 },
+              { size: setting.size2, price: setting.price2, image: setting.image2 },
+            ],
+      })));
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to load category settings' });
+    }
+  });
+
+  const parseCategorySetting = (body: unknown) => {
+    const value = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    const unit = value.unit;
+    const size1 = typeof value.size1 === 'string' ? value.size1.trim() : String(value.size1 ?? '').trim();
+    const size2 = typeof value.size2 === 'string' ? value.size2.trim() : String(value.size2 ?? '').trim();
+    const price1 = Number(value.price1);
+    const price2 = Number(value.price2);
+    const imageValue = (key: 'image1' | 'image2'): string | null | undefined => {
+      const image = value[key];
+      if (image === null || image === undefined || image === '') return null;
+      if (typeof image !== 'string' || image.length > 12_000_000) return undefined;
+      const allowed = image.startsWith('data:image/')
+        || image.startsWith('/')
+        || image.startsWith('http://')
+        || image.startsWith('https://');
+      return allowed ? image : undefined;
+    };
+    const image1 = imageValue('image1');
+    const image2 = imageValue('image2');
+    const rawOptions = value.options;
+    const options = Array.isArray(rawOptions)
+      ? rawOptions.map((option: unknown) => {
+          const item = option && typeof option === 'object' ? option as Record<string, unknown> : {};
+          const size = typeof item.size === 'string' ? item.size.trim() : String(item.size ?? '').trim();
+          const price = Number(item.price);
+          const image = item.image === null || item.image === undefined || item.image === ''
+            ? null
+            : typeof item.image === 'string' && item.image.length <= 12_000_000
+              && (item.image.startsWith('data:image/') || item.image.startsWith('/') || item.image.startsWith('http://') || item.image.startsWith('https://'))
+              ? item.image
+              : undefined;
+          return { size, price, image };
+        })
+      : [
+          { size: typeof value.size1 === 'string' ? value.size1.trim() : String(value.size1 ?? '').trim(), price: Number(value.price1), image: image1 },
+          { size: typeof value.size2 === 'string' ? value.size2.trim() : String(value.size2 ?? '').trim(), price: Number(value.price2), image: image2 },
+        ];
+
+    if (unit !== 'ml' && unit !== 'gram') return { error: 'Unit must be ml or gram' } as const;
+    if (!size1 || !size2 || size1.length > 20 || size2.length > 20) {
+      return { error: 'Enter both sizes using no more than 20 characters' } as const;
+    }
+    if (!Number.isFinite(Number(size1)) || Number(size1) <= 0 || !Number.isFinite(Number(size2)) || Number(size2) <= 0) {
+      return { error: 'Both sizes must be positive numbers' } as const;
+    }
+    if (size1 === size2) return { error: 'The two sizes must be different' } as const;
+    if (!Number.isSafeInteger(price1) || price1 < 0 || !Number.isSafeInteger(price2) || price2 < 0) {
+      return { error: 'Prices must be non-negative whole numbers' } as const;
+    }
+    if (image1 === undefined || image2 === undefined) {
+      return { error: 'Images must be JPG, PNG, or WebP uploads, paths, or URLs' } as const;
+    }
+    if (options.length === 0 || options.some(option =>
+      !option.size
+      || option.size.length > 20
+      || !Number.isFinite(Number(option.size))
+      || Number(option.size) <= 0
+      || !Number.isSafeInteger(option.price)
+      || option.price < 0
+      || option.image === undefined
+    )) {
+      return { error: 'Each option must have a positive size, a non-negative whole-number price, and a valid image' } as const;
+    }
+    if (new Set(options.map(option => Number(option.size))).size !== options.length) {
+      return { error: 'Option sizes must be different' } as const;
+    }
+    return { value: { unit, size1, size2, price1, price2, image1, image2, options } } as const;
+  };
+
+  app.post('/api/admin/category-settings', authenticateAdmin, async (req, res) => {
+    try {
+      const category = typeof req.body?.category === 'string' ? req.body.category.trim() : '';
+      if (!category || category.length > 60) {
+        return res.status(400).json({ error: 'Category name is required and must be 60 characters or fewer' });
+      }
+      const parsed = parseCategorySetting(req.body);
+      if ('error' in parsed) return res.status(400).json({ error: parsed.error });
+      const duplicate = await db.prepare('SELECT category FROM category_settings WHERE lower(category) = lower(?)').get(category);
+      if (duplicate) return res.status(409).json({ error: 'A category with that name already exists' });
+      await db.prepare(`
+        INSERT INTO category_settings (category, unit, size1, size2, price1, price2, image1, image2, options_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(category, parsed.value.unit, parsed.value.size1, parsed.value.size2, parsed.value.price1, parsed.value.price2, parsed.value.image1, parsed.value.image2, JSON.stringify(parsed.value.options));
+      res.status(201).json({ success: true, category });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to create category' });
+    }
+  });
+
+  app.put('/api/admin/category-settings/:category', authenticateAdmin, async (req, res) => {
+    try {
+      const category = req.params.category.trim();
+      if (!await categoryExists(category)) return res.status(404).json({ error: 'Category not found' });
+      const parsed = parseCategorySetting(req.body);
+      if ('error' in parsed) return res.status(400).json({ error: parsed.error });
+      await db.prepare(`
+        UPDATE category_settings
+        SET unit = ?, size1 = ?, size2 = ?, price1 = ?, price2 = ?, image1 = ?, image2 = ?, options_json = ?
+        WHERE category = ?
+      `).run(parsed.value.unit, parsed.value.size1, parsed.value.size2, parsed.value.price1, parsed.value.price2, parsed.value.image1, parsed.value.image2, JSON.stringify(parsed.value.options), category);
+      res.json({ success: true, category });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to update category' });
+    }
+  });
+
+  app.delete('/api/admin/category-settings/:category', authenticateAdmin, async (req, res) => {
+    try {
+      const category = req.params.category.trim();
+      if (!await categoryExists(category)) return res.status(404).json({ error: 'Category not found' });
+      const hasProducts = await db.prepare('SELECT 1 FROM perfumes WHERE category = ? LIMIT 1').get(category);
+      const hasImages = await db.prepare('SELECT 1 FROM catalog_images WHERE category = ? LIMIT 1').get(category);
+      const hasSizeImages = await db.prepare('SELECT 1 FROM catalog_size_images WHERE category = ? LIMIT 1').get(category);
+      if (hasProducts || hasImages || hasSizeImages) {
+        return res.status(409).json({ error: 'This category is in use by products or catalog images and cannot be removed' });
+      }
+      await db.prepare('DELETE FROM category_settings WHERE category = ?').run(category);
+      res.json({ success: true });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to delete category' });
+    }
+  });
+
+  app.get('/api/catalog-size-images', async (_req, res) => {
+    try {
+      const rows = await db.prepare('SELECT gender, category, size, image FROM catalog_size_images').all();
+      res.json(rows);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to load size-specific catalog images' });
+    }
+  });
+
+  app.put('/api/admin/catalog-size-images', authenticateAdmin, async (req, res) => {
+    try {
+      const { gender, category, size, image } = req.body ?? {};
+      const categoryName = typeof category === 'string' ? category.trim() : '';
+      if (!CATALOG_IMAGE_GENDERS.includes(gender) || !await categoryExists(categoryName)) {
+        return res.status(400).json({ error: 'Select a valid gender and category' });
+      }
+      if (size !== 1 && size !== 2) {
+        return res.status(400).json({ error: 'Size must be option 1 or 2' });
+      }
+      if (image === null || image === '') {
+        await db.prepare('DELETE FROM catalog_size_images WHERE gender = ? AND category = ? AND size = ?')
+          .run(gender, categoryName, size);
+        return res.json({ success: true, gender, category: categoryName, size, image: null });
+      }
+      if (typeof image !== 'string' || image.length === 0 || image.length > 12_000_000) {
+        return res.status(400).json({ error: 'The image is missing or too large — pick a smaller picture.' });
+      }
+      const allowed = image.startsWith('data:image/')
+        || image.startsWith('/')
+        || image.startsWith('http://')
+        || image.startsWith('https://');
+      if (!allowed) {
+        return res.status(400).json({ error: 'Unsupported image format — choose a JPG, PNG or WebP picture.' });
+      }
+      await db.prepare(`
+        INSERT INTO catalog_size_images (gender, category, size, image)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(gender, category, size)
+        DO UPDATE SET image = excluded.image, updated_at = CURRENT_TIMESTAMP
+      `).run(gender, categoryName, size, image);
+      res.json({ success: true, gender, category: categoryName, size, image });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to save size-specific catalog image' });
     }
   });
 
@@ -472,9 +675,9 @@ async function startServer() {
   // writes are admin-only. Images are stored as data URLs (same as perfume
   // uploads) or plain paths/URLs, one row per picture.
 
-  app.get('/api/catalog-images', (_req, res) => {
+  app.get('/api/catalog-images', async (_req, res) => {
     try {
-      const rows = db.prepare('SELECT id, gender, category, image FROM catalog_images ORDER BY gender, category, created_at, rowid').all();
+      const rows = await db.prepare('SELECT id, gender, category, image FROM catalog_images ORDER BY gender, category, created_at, id').all();
       res.json(rows);
     } catch (e) {
       console.error(e);
@@ -482,14 +685,32 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/catalog-images', authenticateAdmin, (req, res) => {
+  app.get('/api/perfume-default-images', (_req, res) => {
+    try {
+      const folder = path.join(process.cwd(), 'public', 'images', 'perfumes');
+      if (!fs.existsSync(folder)) {
+        return res.json([]);
+      }
+      const images = fs.readdirSync(folder, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && /\.(png|jpe?g|gif|webp|svg)$/i.test(entry.name))
+        .map((entry) => `/images/perfumes/${entry.name}`)
+        .sort((a, b) => a.localeCompare(b));
+      res.json(images);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Failed to load default perfume images' });
+    }
+  });
+
+  app.post('/api/admin/catalog-images', authenticateAdmin, async (req, res) => {
     try {
       const { gender, category, image } = req.body ?? {};
       if (!CATALOG_IMAGE_GENDERS.includes(gender)) {
         return res.status(400).json({ error: `Gender must be one of: ${CATALOG_IMAGE_GENDERS.join(', ')}` });
       }
-      if (!CATALOG_IMAGE_CATEGORIES.includes(category)) {
-        return res.status(400).json({ error: `Category must be one of: ${CATALOG_IMAGE_CATEGORIES.join(', ')}` });
+      const categoryName = typeof category === 'string' ? category.trim() : '';
+      if (!await categoryExists(categoryName)) {
+        return res.status(400).json({ error: 'Select an existing category' });
       }
       if (typeof image !== 'string' || image.length === 0 || image.length > 12_000_000) {
         return res.status(400).json({ error: 'The image is missing or too large — pick a smaller picture.' });
@@ -502,8 +723,8 @@ async function startServer() {
         return res.status(400).json({ error: 'Unsupported image format — choose a JPG, PNG or WebP picture.' });
       }
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      db.prepare('INSERT INTO catalog_images (id, gender, category, image) VALUES (?, ?, ?, ?)').run(id, gender, category, image);
-      res.json({ success: true, id, gender, category, image });
+      await db.prepare('INSERT INTO catalog_images (id, gender, category, image) VALUES (?, ?, ?, ?)').run(id, gender, categoryName, image);
+      res.json({ success: true, id, gender, category: categoryName, image });
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: 'Failed to save catalog image' });
@@ -514,30 +735,33 @@ async function startServer() {
   // picking deterministically per product code so the same product always gets
   // the same picture. This is the explicit "force these photos" action — the
   // passive catalog substitution only replaces placeholder bottles.
-  app.post('/api/admin/catalog-images/apply', authenticateAdmin, (req, res) => {
+  app.post('/api/admin/catalog-images/apply', authenticateAdmin, async (req, res) => {
     try {
       const { gender, category } = req.body ?? {};
-      if (!CATALOG_IMAGE_GENDERS.includes(gender) || !CATALOG_IMAGE_CATEGORIES.includes(category)) {
+      const categoryName = typeof category === 'string' ? category.trim() : '';
+      if (!CATALOG_IMAGE_GENDERS.includes(gender) || !await categoryExists(categoryName)) {
         return res.status(400).json({ error: 'Gender and category are required' });
       }
-      const pool = (db.prepare('SELECT image FROM catalog_images WHERE gender = ? AND category = ? ORDER BY created_at, rowid')
-        .all(gender, category) as { image: string }[]).map(row => row.image).filter(img => img.length > 0);
-      if (pool.length === 0) {
+      const images = (await db.prepare('SELECT image FROM catalog_images WHERE gender = ? AND category = ? ORDER BY created_at, id')
+        .all(gender, categoryName) as { image: string }[]).map(row => row.image).filter(img => img.length > 0);
+      if (images.length === 0) {
         return res.status(400).json({ error: 'This Gender/Category bucket has no images yet — add some first.' });
       }
-      const products = db.prepare('SELECT id, code FROM perfumes WHERE gender = ? AND category = ?')
-        .all(gender, category) as { id: string; code: string | null }[];
-      const update = db.prepare('UPDATE perfumes SET mainImage = ?, miniImage = ? WHERE id = ?');
-      db.exec('BEGIN');
+      const products = await db.prepare('SELECT id, code FROM perfumes WHERE gender = ? AND category = ?')
+        .all(gender, categoryName) as { id: string; code: string | null }[];
+      const client = await pool.connect();
       try {
-        products.forEach(product => {
-          const image = pool[hashSeed(product.code || product.id) % pool.length];
-          update.run(image, image, product.id);
-        });
-        db.exec('COMMIT');
+        await client.query('BEGIN');
+        for (const product of products) {
+          const image = images[hashSeed(product.code || product.id) % images.length];
+          await client.query('UPDATE perfumes SET mainimage = $1, miniimage = $1 WHERE id = $2', [image, product.id]);
+        }
+        await client.query('COMMIT');
       } catch (txError) {
-        db.exec('ROLLBACK');
+        await client.query('ROLLBACK');
         throw txError;
+      } finally {
+        client.release();
       }
       res.json({ success: true, updated: products.length });
     } catch (e) {
@@ -546,9 +770,9 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/admin/catalog-images/:id', authenticateAdmin, (req, res) => {
+  app.delete('/api/admin/catalog-images/:id', authenticateAdmin, async (req, res) => {
     try {
-      db.prepare('DELETE FROM catalog_images WHERE id = ?').run(req.params.id);
+      await db.prepare('DELETE FROM catalog_images WHERE id = ?').run(req.params.id);
       res.json({ success: true });
     } catch (e) {
       console.error(e);
@@ -578,16 +802,16 @@ async function startServer() {
     }
   });
 
-  app.get('/api/perfumes', (req, res) => {
+  app.get('/api/perfumes', async (req, res) => {
     try {
       const stmt = db.prepare('SELECT * FROM perfumes ORDER BY created_at DESC');
-      const rows = stmt.all() as any[];
+      const rows = await stmt.all() as any[];
       
       const parsedPerfumes = rows.map(row => ({
         ...row,
         stockStatus: normalizeStockStatus(row.stockStatus),
-        sizeUnit: row.sizeUnit === 'g' ? 'g' : 'ml',
-        sizePrices: JSON.parse(row.sizePrices || '[]'),
+        stockStatus1: row.stockStatus1 ? normalizeStockStatus(row.stockStatus1) : null,
+        stockStatus2: row.stockStatus2 ? normalizeStockStatus(row.stockStatus2) : null,
         galleryImages: JSON.parse(row.galleryImages || '[]'),
         accords: JSON.parse(row.accords || '[]'),
         fragranceProfile: JSON.parse(row.fragranceProfile || '{}'),
@@ -602,31 +826,49 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/perfumes', authenticateAdmin, (req, res) => {
+  app.post('/api/admin/perfumes', authenticateAdmin, async (req, res) => {
     try {
       const p = req.body;
+      const pricePerGram = p.pricePerGram === null || p.pricePerGram === undefined || p.pricePerGram === ''
+        ? null
+        : Number(p.pricePerGram);
+      const sizePrice1 = optionalNonNegativePrice(p.sizePrice1);
+      const sizePrice2 = optionalNonNegativePrice(p.sizePrice2);
+      if (['stockStatus1', 'stockStatus2'].some(key => p[key] != null && p[key] !== '' && !isValidStockStatus(p[key]))) {
+        return res.status(400).json({ error: 'Size stock status must be In Stock, Low Stock, or Out Stock' });
+      }
+      if (p.unit !== undefined && p.unit !== 'ml' && p.unit !== 'gram') {
+        return res.status(400).json({ error: 'Product unit must be ml or gram' });
+      }
+      if (Number.isNaN(sizePrice1) || Number.isNaN(sizePrice2)) {
+        return res.status(400).json({ error: 'Size prices must be non-negative numbers' });
+      }
+      if (p.pricePerGram !== null && p.pricePerGram !== undefined && p.pricePerGram !== ''
+        && (!Number.isFinite(pricePerGram) || pricePerGram < 0)) {
+        return res.status(400).json({ error: 'Price per gram must be a non-negative number' });
+      }
+      if (!isValidOptionalImage(p.sizeImage1) || !isValidOptionalImage(p.sizeImage2)) {
+        return res.status(400).json({ error: 'Size images must be image uploads, paths, or URLs no larger than 12 MB' });
+      }
       const id = Date.now().toString(); // rudimentary ID definition
       
       const stmt = db.prepare(`
         INSERT INTO perfumes (
-          id, name, code, brand, price, sizeUnit, sizePrices, gender, category, stockStatus, description, rating,
+          id, name, code, brand, price, unit, sizePrice1, sizePrice2, pricePerGram, sizeImage1, sizeImage2, gender, category, stockStatus, stockStatus1, stockStatus2, description, rating,
           mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       
       // New products without their own photo (or still showing a placeholder
       // bottle) pick one from the catalog image library for their Gender ×
       // Category bucket — deterministic per product code.
       const mainImage = isPlaceholderImage(p.mainImage)
-        ? (pickCatalogImage(p.gender, p.category, p.code || id) ?? p.mainImage ?? FALLBACK_BOTTLE_IMAGE)
+        ? (await pickCatalogImage(p.gender, p.category, p.code || id) ?? p.mainImage ?? FALLBACK_BOTTLE_IMAGE)
         : p.mainImage;
       const miniImage = p.miniImage && !isPlaceholderImage(p.miniImage) ? p.miniImage : mainImage;
 
-      stmt.run(
-        id, p.name, p.code, p.brand, p.price,
-        p.sizeUnit === 'g' ? 'g' : 'ml',
-        JSON.stringify(Array.isArray(p.sizePrices) ? p.sizePrices : []),
-        p.gender, p.category, normalizeStockStatus(p.stockStatus), p.description, p.rating,
+      await stmt.run(
+        id, p.name, p.code, p.brand, p.price, p.unit ?? null, sizePrice1 ?? null, sizePrice2 ?? null, pricePerGram, p.sizeImage1 || null, p.sizeImage2 || null, p.gender, p.category, normalizeStockStatus(p.stockStatus), p.stockStatus1 ? normalizeStockStatus(p.stockStatus1) : null, p.stockStatus2 ? normalizeStockStatus(p.stockStatus2) : null, p.description, p.rating,
         mainImage,
         miniImage,
         JSON.stringify(p.galleryImages || []),
@@ -644,27 +886,46 @@ async function startServer() {
     }
   });
 
-  app.put('/api/admin/perfumes/:id', authenticateAdmin, (req, res) => {
+  app.put('/api/admin/perfumes/:id', authenticateAdmin, async (req, res) => {
     try {
       const p = req.body;
       const id = req.params.id;
+      const pricePerGram = p.pricePerGram === null || p.pricePerGram === undefined || p.pricePerGram === ''
+        ? null
+        : Number(p.pricePerGram);
+      const sizePrice1 = optionalNonNegativePrice(p.sizePrice1);
+      const sizePrice2 = optionalNonNegativePrice(p.sizePrice2);
+      if (['stockStatus1', 'stockStatus2'].some(key => p[key] != null && p[key] !== '' && !isValidStockStatus(p[key]))) {
+        return res.status(400).json({ error: 'Size stock status must be In Stock, Low Stock, or Out Stock' });
+      }
+      if (p.unit !== undefined && p.unit !== 'ml' && p.unit !== 'gram') {
+        return res.status(400).json({ error: 'Product unit must be ml or gram' });
+      }
+      if (Number.isNaN(sizePrice1) || Number.isNaN(sizePrice2)) {
+        return res.status(400).json({ error: 'Size prices must be non-negative numbers' });
+      }
+      if ('pricePerGram' in p && p.pricePerGram !== null && p.pricePerGram !== ''
+        && (!Number.isFinite(pricePerGram) || pricePerGram < 0)) {
+        return res.status(400).json({ error: 'Price per gram must be a non-negative number' });
+      }
+      if (('sizeImage1' in p && !isValidOptionalImage(p.sizeImage1))
+        || ('sizeImage2' in p && !isValidOptionalImage(p.sizeImage2))) {
+        return res.status(400).json({ error: 'Size images must be image uploads, paths, or URLs no larger than 12 MB' });
+      }
 
       // If the perfume isn't in the database (e.g. the admin edited a built-in
       // demo perfume while the DB is empty), store it as a new row instead of
       // silently updating nothing.
-      const existing = db.prepare('SELECT id FROM perfumes WHERE id = ?').get(id);
+      const existing = await db.prepare('SELECT id FROM perfumes WHERE id = ?').get(id);
       if (!existing) {
         const insertStmt = db.prepare(`
           INSERT INTO perfumes (
-            id, name, code, brand, price, sizeUnit, sizePrices, gender, category, stockStatus, description, rating,
+              id, name, code, brand, price, unit, sizePrice1, sizePrice2, pricePerGram, sizeImage1, sizeImage2, gender, category, stockStatus, stockStatus1, stockStatus2, description, rating,
             mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
-        insertStmt.run(
-          id, p.name, p.code, p.brand, p.price,
-          p.sizeUnit === 'g' ? 'g' : 'ml',
-          JSON.stringify(Array.isArray(p.sizePrices) ? p.sizePrices : []),
-          p.gender, p.category, normalizeStockStatus(p.stockStatus), p.description, p.rating,
+        await insertStmt.run(
+            id, p.name, p.code, p.brand, p.price, p.unit ?? null, sizePrice1 ?? null, sizePrice2 ?? null, pricePerGram, p.sizeImage1 || null, p.sizeImage2 || null, p.gender, p.category, normalizeStockStatus(p.stockStatus), p.stockStatus1 ? normalizeStockStatus(p.stockStatus1) : null, p.stockStatus2 ? normalizeStockStatus(p.stockStatus2) : null, p.description, p.rating,
           p.mainImage,
           p.miniImage || p.mainImage || null,
           JSON.stringify(p.galleryImages || []),
@@ -688,11 +949,17 @@ async function startServer() {
         code: b => b.code,
         brand: b => b.brand,
         price: b => b.price,
-        sizeUnit: b => b.sizeUnit === 'g' ? 'g' : 'ml',
-        sizePrices: b => JSON.stringify(Array.isArray(b.sizePrices) ? b.sizePrices : []),
+        unit: b => b.unit ?? null,
+        sizePrice1: b => b.sizePrice1 ?? null,
+        sizePrice2: b => b.sizePrice2 ?? null,
+        pricePerGram: b => b.pricePerGram === null || b.pricePerGram === '' ? null : Number(b.pricePerGram),
+        sizeImage1: b => b.sizeImage1 || null,
+        sizeImage2: b => b.sizeImage2 || null,
         gender: b => b.gender,
         category: b => b.category,
         stockStatus: b => normalizeStockStatus(b.stockStatus),
+        stockStatus1: b => b.stockStatus1 ? normalizeStockStatus(b.stockStatus1) : null,
+        stockStatus2: b => b.stockStatus2 ? normalizeStockStatus(b.stockStatus2) : null,
         description: b => b.description,
         rating: b => b.rating,
         mainImage: b => b.mainImage,
@@ -720,7 +987,7 @@ async function startServer() {
       
       if (stmt) {
         updateValues.push(id);
-        stmt.run(...updateValues);
+        await stmt.run(...updateValues);
       }
 
       res.json({ success: true });
@@ -730,10 +997,10 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/admin/perfumes/:id', authenticateAdmin, (req, res) => {
+  app.delete('/api/admin/perfumes/:id', authenticateAdmin, async (req, res) => {
     try {
       const stmt = db.prepare('DELETE FROM perfumes WHERE id = ?');
-      stmt.run(req.params.id);
+      await stmt.run(req.params.id);
       res.json({ success: true });
     } catch (e) {
       console.error(e);
@@ -755,7 +1022,7 @@ async function startServer() {
   // and the mini image) to every product in the file, and new products without
   // any image get the default bottle photo.
 
-  const EXCEL_SHEET_NAME = 'Perfumes';
+  const EXCEL_SHEET_NAME = 'products';
 
   // Same fallbacks the admin form and seed data use.
   const DEFAULT_PERFUME_IMAGE = '/images/perfumes/normal.jpg';
@@ -765,13 +1032,14 @@ async function startServer() {
     { header: 'id', key: 'id', width: 14 },
     { header: 'name', key: 'name', width: 30 },
     { header: 'code', key: 'code', width: 12 },
+    { header: 'productType', key: 'productType', width: 14 },
     { header: 'brand', key: 'brand', width: 22 },
     { header: 'price', key: 'price', width: 10 },
-    { header: 'sizeUnit', key: 'sizeUnit', width: 12 },
-    { header: 'sizePrices', key: 'sizePrices', width: 30 },
     { header: 'gender', key: 'gender', width: 12 },
     { header: 'category', key: 'category', width: 16 },
     { header: 'stockStatus', key: 'stockStatus', width: 12 },
+    { header: 'stockStatus1', key: 'stockStatus1', width: 14 },
+    { header: 'stockStatus2', key: 'stockStatus2', width: 14 },
     { header: 'description', key: 'description', width: 40 },
     { header: 'rating', key: 'rating', width: 8 },
     { header: 'accords', key: 'accords', width: 36 },
@@ -781,13 +1049,46 @@ async function startServer() {
     { header: 'notes.top', key: 'notes.top', width: 32 },
     { header: 'notes.middle', key: 'notes.middle', width: 32 },
     { header: 'notes.base', key: 'notes.base', width: 32 },
+    { header: 'pricePerGram', key: 'pricePerGram', width: 14 },
+    { header: 'unit', key: 'unit', width: 10 },
+    { header: 'sizePrice1', key: 'sizePrice1', width: 14 },
+    { header: 'sizePrice2', key: 'sizePrice2', width: 14 },
   ];
 
   const EXCEL_GENDERS = ['Male', 'Female', 'Kids', 'Unisex'];
-  const EXCEL_CATEGORIES = ['Perfume', 'Brand Perfume', 'Luxury Perfume'];
   const EXCEL_DAY_NIGHT = ['Day', 'Night', 'Both'];
   const EXCEL_STOCK_STATUSES = ['In Stock', 'Low Stock', 'Out Stock'];
   const EXCEL_SEASONS = ['Winter', 'Spring', 'Summer', 'Autumn'];
+  const EXCEL_PRODUCT_TYPES = ['PERFUME', 'OIL', 'PURE_OIL'];
+
+  const excelProductTypeForCategory = (category: string): string => {
+    if (category === 'Oil') return 'OIL';
+    if (category === '3ml Oil') return 'PURE_OIL';
+    return 'PERFUME';
+  };
+
+  const excelCategoryForProduct = (category: string, gender: string): string => {
+    if (category !== 'Perfume') return category;
+    if (gender === 'Male') return 'Men';
+    if (gender === 'Female') return 'Women';
+    return gender;
+  };
+
+  const normalizeExcelProductCategory = async (rawCategory: string, rawProductType: string): Promise<string> => {
+    const normalizedType = rawProductType.trim().toUpperCase();
+    if (normalizedType && !EXCEL_PRODUCT_TYPES.includes(normalizedType)) {
+      throw new Error(`Unknown productType "${rawProductType}". Use PERFUME, OIL, or PURE_OIL.`);
+    }
+    if (normalizedType === 'OIL') return 'Oil';
+    if (normalizedType === 'PURE_OIL') return '3ml Oil';
+
+    const value = rawCategory.trim();
+    const regularAliases = ['men', 'male', 'women', 'woman', 'female', 'unisex', 'kids', 'kid'];
+    if (regularAliases.includes(value.toLowerCase())) return 'Perfume';
+    const match = await db.prepare('SELECT category FROM category_settings WHERE lower(category) = lower(?)').get(value) as { category: string } | undefined;
+    if (match) return match.category;
+    throw new Error(`Unknown category "${rawCategory}". Create it in admin Category settings first.`);
+  };
 
   /** ExcelJS cell values can be primitives or objects (rich text, formula results, hyperlinks) — flatten everything to trimmed text. */
   const excelCellText = (value: unknown): string => {
@@ -837,23 +1138,19 @@ async function startServer() {
       id: (p.id as string) ?? '',
       name: (p.name as string) ?? '',
       code: (p.code as string) ?? '',
+      productType: excelProductTypeForCategory(String(p.category ?? 'Perfume')),
       brand: (p.brand as string) ?? '',
       price: typeof p.price === 'number' ? p.price : 0,
-      sizeUnit: p.sizeUnit === 'g' ? 'g' : 'ml',
-      sizePrices: Array.isArray(p.sizePrices)
-        ? (p.sizePrices as { amount?: unknown; price?: unknown }[])
-          .filter(option => typeof option.amount === 'number' && typeof option.price === 'number')
-          .map(option => `${option.amount}:${option.price}`)
-          .join(' | ')
-        : '',
       gender: (p.gender as string) ?? '',
-      category: (p.category as string) ?? '',
-      stockStatus: normalizeStockStatus(p.stockStatus as string | undefined),
+      category: excelCategoryForProduct(String(p.category ?? 'Perfume'), String(p.gender ?? 'Unisex')),
+      stockStatus: normalizeStockStatus(p.stockStatus as string | undefined) === 'Out Stock' ? 'Out of Stock' : normalizeStockStatus(p.stockStatus as string | undefined),
+      stockStatus1: p.stockStatus1 ? (normalizeStockStatus(p.stockStatus1 as string) === 'Out Stock' ? 'Out of Stock' : normalizeStockStatus(p.stockStatus1 as string)) : '',
+      stockStatus2: p.stockStatus2 ? (normalizeStockStatus(p.stockStatus2 as string) === 'Out Stock' ? 'Out of Stock' : normalizeStockStatus(p.stockStatus2 as string)) : '',
       description: (p.description as string) ?? '',
       rating: typeof p.rating === 'number' ? p.rating : '',
       accords: accords
         .filter(accord => accord && typeof accord.name === 'string')
-        .map(accord => `${accord.name}:${typeof accord.value === 'number' ? accord.value : 75}`)
+        .map(accord => `${accord.name}:${typeof accord.value === 'number' ? accord.value : 75}${typeof accord.customColor === 'string' ? `:${accord.customColor}` : ''}`)
         .join(' | '),
       fragranceProfile: (['longevity', 'projection', 'sillage'] as const)
         .filter(key => profile[key] != null && String(profile[key]).length > 0)
@@ -864,6 +1161,10 @@ async function startServer() {
       'notes.top': notesTierCell('top'),
       'notes.middle': notesTierCell('middle'),
       'notes.base': notesTierCell('base'),
+      pricePerGram: typeof p.pricePerGram === 'number' ? p.pricePerGram : '',
+      unit: typeof p.unit === 'string' ? p.unit : '',
+      sizePrice1: typeof p.sizePrice1 === 'number' ? p.sizePrice1 : '',
+      sizePrice2: typeof p.sizePrice2 === 'number' ? p.sizePrice2 : '',
     };
   };
 
@@ -878,22 +1179,27 @@ async function startServer() {
       id: '',
       name: 'Example Perfume',
       code: 'P1234',
+      productType: 'PERFUME',
       brand: 'Our Fragrance',
       price: 2500,
-      sizeUnit: 'ml',
-      sizePrices: '50:1500 | 100:2500',
       gender: 'Unisex',
-      category: 'Perfume',
+      category: 'Unisex',
       stockStatus: 'In Stock',
+      stockStatus1: 'In Stock',
+      stockStatus2: 'Low Stock',
       description: 'A warm amber fragrance with a woody base.',
       rating: 4.5,
-      accords: 'Amber:80 | Woody:65',
+      accords: 'Amber:80:#d99e4c | Woody:65:#a16207',
       fragranceProfile: 'longevity=8H | projection=Moderate | sillage=Moderate',
       dayNight: 'Both',
       seasons: 'Autumn | Winter',
       'notes.top': 'Bergamot | Pink Pepper',
       'notes.middle': 'Rose',
       'notes.base': 'Sandalwood | Vanilla',
+      pricePerGram: '',
+      unit: 'ml',
+      sizePrice1: 2500,
+      sizePrice2: 4500,
     });
     sheet.getRow(1).font = { bold: true };
     sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFEFEF' } };
@@ -909,13 +1215,17 @@ async function startServer() {
       ['id', 'no', 'Leave empty for new products. Existing products are matched by id first, then by code — a match updates the product instead of creating a duplicate.'],
       ['name', 'YES', 'Product name. Required for new rows; rows that match an existing product by id or code may leave it empty to keep the current name.'],
       ['code', 'no', 'Unique product code (e.g. P1234). New rows without a code get one generated automatically.'],
+      ['productType', 'no', 'PERFUME, OIL, or PURE_OIL. OIL products import into Oil; PURE_OIL products import into 3ml Oil. Defaults from category.'],
       ['brand', 'no', 'Brand name. New regular perfumes default to "Our Fragrance".'],
       ['price', 'no', 'Whole number in ETB (e.g. 2500). Defaults to 0.'],
-      ['sizeUnit', 'no', 'Size unit for options: ml or g. Defaults to ml.'],
-      ['sizePrices', 'no', 'Size and price pairs separated by " | " in amount:price format, e.g. 50:1500 | 100:2500.'],
+      ['pricePerGram', 'no', 'For products in gram-based categories, the product price per gram in ETB. The catalog multiplies this by the selected gram size.'],
+      ['unit', 'no', 'Product-specific size unit: ml or gram. If omitted, the category unit is used.'],
+      ['sizePrice1 / sizePrice2', 'no', 'Product-specific prices for the category’s first and second configured sizes when unit is ml.'],
       ['gender', 'no', 'Male, Female, Kids or Unisex. Defaults to Unisex (spelling is case-insensitive).'],
-      ['category', 'no', 'Perfume, Brand Perfume or Luxury Perfume. Defaults to Perfume.'],
+      ['category', 'no', 'Any category configured in Admin > Catalog Images. Defaults to Perfume; unknown categories are rejected.'],
+      ['category mapping', '-', 'Men, Women, Unisex, or Kids maps to the Regular (Perfume) catalog category. Brand Perfume and Luxury Perfume stay as selected.'],
       ['stockStatus', 'no', 'In Stock, Low Stock or Out Stock. Defaults to In Stock.'],
+      ['stockStatus1 / stockStatus2', 'no', 'Optional stock status for the category’s first and second configured sizes. When blank, the product stockStatus is used.'],
       ['description', 'no', 'Free text shown in the details modal.'],
       ['rating', 'no', 'Number between 0 and 5 (decimals allowed). Defaults to 5.'],
       ['accords', 'no', 'Pairs of "Name:strength" (0-100) separated by " | ". Example: Woody:80 | Amber:60. Empty keeps the current accords.'],
@@ -945,7 +1255,7 @@ async function startServer() {
   // Export the whole catalog as an .xlsx workbook.
   app.get('/api/admin/perfumes/export', authenticateAdmin, async (_req, res) => {
     try {
-      const rows = db.prepare('SELECT * FROM perfumes ORDER BY created_at DESC').all() as Record<string, unknown>[];
+      const rows = await db.prepare('SELECT * FROM perfumes ORDER BY created_at DESC').all() as Record<string, unknown>[];
       const workbook = new ExcelJS.Workbook();
       workbook.creator = 'Lumiere Admin';
       const sheet = workbook.addWorksheet(EXCEL_SHEET_NAME);
@@ -957,7 +1267,6 @@ async function startServer() {
         sheet.addRow(perfumeToExcelRow({
           ...row,
           galleryImages: safeJsonParse<unknown[]>(row.galleryImages as string, []),
-          sizePrices: safeJsonParse<{ amount: number; price: number }[]>(row.sizePrices as string, []),
           accords: safeJsonParse<unknown[]>(row.accords as string, []),
           fragranceProfile: safeJsonParse<Record<string, unknown>>(row.fragranceProfile as string, {}),
           seasons: safeJsonParse<unknown[]>(row.seasons as string, []),
@@ -1026,21 +1335,22 @@ async function startServer() {
 
       // Accord colors are global (accord_colors table) — load once and reuse.
       const accordColors = new Map<string, string>();
-      try {
-        (db.prepare('SELECT name, color FROM accord_colors').all() as { name: string; color: string }[])
-          .forEach(row => accordColors.set(row.name.toLowerCase(), row.color));
-      } catch { /* table may not exist yet — the fallback color is used */ }
+      (await db.prepare('SELECT name, color FROM accord_colors').all() as { name: string; color: string }[])
+        .forEach(row => accordColors.set(row.name.toLowerCase(), row.color));
 
       const parseAccords = (raw: string): { name: string; value: number; color: string }[] =>
         splitExcelList(raw)
           .map(part => {
-            const colon = part.indexOf(':');
-            const name = (colon === -1 ? part : part.slice(0, colon)).trim();
-            const value = colon === -1 ? NaN : Number(part.slice(colon + 1));
+            const [rawName, rawValue, ...rawColor] = part.split(':');
+            const name = rawName.trim();
+            const value = rawValue === undefined ? NaN : Number(rawValue);
+            const color = rawColor.join(':').trim();
+            const customColor = /^#[\da-f]{6}$/i.test(color) ? color : undefined;
             return {
               name,
               value: Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : 75,
-              color: accordColors.get(name.toLowerCase()) ?? '#666666',
+              color: customColor ?? accordColors.get(name.toLowerCase()) ?? '#666666',
+              ...(customColor ? { customColor } : {}),
             };
           })
           .filter(accord => accord.name.length > 0);
@@ -1058,16 +1368,30 @@ async function startServer() {
       // one file behave predictably (first row creates, later rows update it).
       const knownIds = new Set<string>();
       const codeToId = new Map<string, string>();
-      (db.prepare('SELECT id, code FROM perfumes').all() as { id: string; code: string | null }[]).forEach(row => {
+      (await db.prepare('SELECT id, code FROM perfumes').all() as { id: string; code: string | null }[]).forEach(row => {
         knownIds.add(row.id);
         if (row.code) codeToId.set(row.code, row.id);
       });
 
-      const insertStmt = db.prepare(`
+      const client = await pool.connect();
+      const txDb = {
+        prepare(sql: string) {
+          const statement = toPostgresPlaceholders(sql);
+          return {
+            all: async (...values: unknown[]) => (await client.query(statement, values)).rows.map(normalizeDatabaseRow),
+            get: async (...values: unknown[]) => {
+              const result = await client.query(statement, values);
+              return result.rows[0] ? normalizeDatabaseRow(result.rows[0]) : undefined;
+            },
+            run: async (...values: unknown[]) => client.query(statement, values),
+          };
+        },
+      };
+      const insertStmt = txDb.prepare(`
         INSERT INTO perfumes (
-          id, name, code, brand, price, sizeUnit, sizePrices, gender, category, stockStatus, description, rating,
+          id, name, code, brand, price, unit, sizePrice1, sizePrice2, pricePerGram, gender, category, stockStatus, stockStatus1, stockStatus2, description, rating,
           mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       let created = 0;
@@ -1076,10 +1400,11 @@ async function startServer() {
       let generatedSequence = 0;
       const errors: { row: number; message: string }[] = [];
 
-      db.exec('BEGIN');
+      await client.query('BEGIN');
       try {
-        sheet.eachRow({ includeEmpty: false }, (row: { getCell: (col: number) => { value: unknown } }, rowNumber: number) => {
-          if (rowNumber === 1) return; // header row
+        for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+          const row = sheet.getRow(rowNumber);
+          if (row.cellCount === 0) continue;
           try {
             const name = cellText(row, 'name');
             const code = cellText(row, 'code');
@@ -1105,28 +1430,62 @@ async function startServer() {
               if (!Number.isFinite(price)) throw new Error(`Price "${priceRaw}" is not a valid number`);
               fields.price = price;
             }
-            const sizeUnitRaw = cellText(row, 'sizeUnit');
-            if (sizeUnitRaw) fields.sizeUnit = sizeUnitRaw.trim().toLowerCase() === 'g' ? 'g' : 'ml';
-            const sizePricesRaw = cellText(row, 'sizePrices');
-            if (sizePricesRaw) {
-              const sizePrices = splitExcelList(sizePricesRaw).map(pair => {
-                const separator = pair.indexOf(':');
-                if (separator <= 0) throw new Error(`Size price "${pair}" must use amount:price format`);
-                const amount = Number(pair.slice(0, separator).trim());
-                const price = Number(pair.slice(separator + 1).replace(/[,\s]/g, ''));
-                if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(price) || price < 0) {
-                  throw new Error(`Size price "${pair}" must contain a positive size and a valid price`);
-                }
-                return { amount, price };
-              });
-              fields.sizePrices = JSON.stringify(sizePrices);
+            const pricePerGramRaw = cellText(row, 'pricePerGram');
+            if (pricePerGramRaw !== '') {
+              const pricePerGram = Number(pricePerGramRaw.replace(/[,\s]/g, ''));
+              if (!Number.isFinite(pricePerGram) || pricePerGram < 0) {
+                throw new Error(`Price per gram "${pricePerGramRaw}" must be a non-negative number`);
+              }
+              fields.pricePerGram = pricePerGram;
+            }
+            const unitRaw = cellText(row, 'unit');
+            if (unitRaw) {
+              const unit = unitRaw.trim().toLowerCase();
+              if (unit !== 'ml' && unit !== 'gram') throw new Error(`Unknown unit "${unitRaw}". Use ml or gram.`);
+              fields.unit = unit;
+            }
+            for (const [column, header] of [['sizePrice1', 'sizePrice1'], ['sizePrice2', 'sizePrice2']] as const) {
+              const raw = cellText(row, header);
+              if (raw === '') continue;
+              const price = Number(raw.replace(/[,\s]/g, ''));
+              if (!Number.isFinite(price) || price < 0) {
+                throw new Error(`${header} must be a non-negative number`);
+              }
+              fields[column] = price;
             }
             const gender = cellText(row, 'gender');
             if (gender) fields.gender = matchExcelEnum(gender, EXCEL_GENDERS, 'Unisex');
             const category = cellText(row, 'category');
-            if (category) fields.category = matchExcelEnum(category, EXCEL_CATEGORIES, 'Perfume');
+            const productType = cellText(row, 'productType');
+            if (productType && !EXCEL_PRODUCT_TYPES.includes(productType.trim().toUpperCase())) {
+              throw new Error(`Unknown productType "${productType}". Use PERFUME, OIL, or PURE_OIL.`);
+            }
+            if (category || productType) {
+              fields.category = await normalizeExcelProductCategory(
+                category || (productType.trim().toUpperCase() === 'OIL'
+                  ? 'Oil'
+                  : productType.trim().toUpperCase() === 'PURE_OIL' ? '3ml Oil' : 'Perfume'),
+                productType
+              );
+            }
             const stockStatus = cellText(row, 'stockStatus');
-            if (stockStatus) fields.stockStatus = matchExcelEnum(stockStatus, EXCEL_STOCK_STATUSES, 'In Stock');
+            if (stockStatus) {
+              const normalizedStockStatus = stockStatus.trim().toLowerCase() === 'out of stock'
+                ? 'Out Stock'
+                : matchExcelEnum(stockStatus, EXCEL_STOCK_STATUSES, 'In Stock');
+              fields.stockStatus = normalizedStockStatus;
+            }
+            for (const key of ['stockStatus1', 'stockStatus2'] as const) {
+              const rawStatus = cellText(row, key);
+              if (!rawStatus) continue;
+              const normalizedStatus = rawStatus.trim().toLowerCase() === 'out of stock'
+                ? 'Out Stock'
+                : matchExcelEnum(rawStatus, EXCEL_STOCK_STATUSES, '');
+              if (!normalizedStatus) {
+                throw new Error(`${key} must be In Stock, Low Stock, or Out Stock`);
+              }
+              fields[key] = normalizedStatus;
+            }
             const description = cellText(row, 'description');
             if (description) fields.description = description;
             const ratingRaw = cellText(row, 'rating');
@@ -1169,7 +1528,7 @@ async function startServer() {
               // Partial, non-destructive update — mirrors the PUT endpoint:
               // only cells with content are written.
               if (Object.keys(profileUpdate).length > 0) {
-                const current = db.prepare('SELECT fragranceProfile FROM perfumes WHERE id = ?').get(targetId) as { fragranceProfile: string | null } | undefined;
+                const current = await txDb.prepare('SELECT fragranceProfile FROM perfumes WHERE id = ?').get(targetId) as { fragranceProfile: string | null } | undefined;
                 const existing = safeJsonParse<Record<string, string>>(current?.fragranceProfile, {});
                 fields.fragranceProfile = JSON.stringify({
                   longevity: profileUpdate.longevity ?? existing.longevity ?? '',
@@ -1178,7 +1537,7 @@ async function startServer() {
                 });
               }
               if (Object.keys(notesUpdate).length > 0) {
-                const current = db.prepare('SELECT notes FROM perfumes WHERE id = ?').get(targetId) as { notes: string | null } | undefined;
+                const current = await txDb.prepare('SELECT notes FROM perfumes WHERE id = ?').get(targetId) as { notes: string | null } | undefined;
                 const existing = safeJsonParse<Record<string, unknown>>(current?.notes, {});
                 const existingTier = (tier: 'top' | 'middle' | 'base'): { name: string; iconUrl: string }[] =>
                   Array.isArray(existing[tier]) ? (existing[tier] as { name: string; iconUrl: string }[]) : [];
@@ -1202,7 +1561,7 @@ async function startServer() {
               const setKeys = Object.keys(fields);
               if (setKeys.length > 0) {
                 // setKeys contains only the fixed column names above — no user input.
-                db.prepare(`UPDATE perfumes SET ${setKeys.map(key => `${key} = ?`).join(', ')} WHERE id = ?`)
+                await txDb.prepare(`UPDATE perfumes SET ${setKeys.map(key => `${key} = ?`).join(', ')} WHERE id = ?`)
                   .run(...(setKeys.map(key => fields[key]) as never[]), targetId);
               }
               if (code) codeToId.set(code, targetId);
@@ -1213,20 +1572,24 @@ async function startServer() {
               // "One image for all" wins; otherwise a library image for the
               // row's Gender × Category; otherwise the default bottle photo.
               const resolvedImage = sharedImage
-                ?? pickCatalogImage((fields.gender as string) ?? 'Unisex', (fields.category as string) ?? 'Perfume', name)
+                ?? await pickCatalogImage((fields.gender as string) ?? 'Unisex', (fields.category as string) ?? 'Perfume', name)
                 ?? DEFAULT_PERFUME_IMAGE;
               const insertedCode = code || `IMP-${Date.now().toString(36)}-${rowNumber}`;
-              insertStmt.run(
+              await insertStmt.run(
                 newId,
                 name,
                 insertedCode,
                 (fields.brand as string) ?? 'Our Fragrance',
                 (fields.price as number) ?? 0,
-                (fields.sizeUnit as string) ?? 'ml',
-                (fields.sizePrices as string) ?? '[]',
+                (fields.unit as string) ?? null,
+                (fields.sizePrice1 as number) ?? null,
+                (fields.sizePrice2 as number) ?? null,
+                (fields.pricePerGram as number) ?? null,
                 (fields.gender as string) ?? 'Unisex',
                 (fields.category as string) ?? 'Perfume',
                 (fields.stockStatus as string) ?? 'In Stock',
+                (fields.stockStatus1 as string) ?? null,
+                (fields.stockStatus2 as string) ?? null,
                 (fields.description as string) ?? '',
                 (fields.rating as number) ?? 5,
                 resolvedImage,
@@ -1254,11 +1617,13 @@ async function startServer() {
             skipped += 1;
             errors.push({ row: rowNumber, message: rowError instanceof Error ? rowError.message : 'Unknown error' });
           }
-        });
-        db.exec('COMMIT');
+        }
+        await client.query('COMMIT');
       } catch (transactionError) {
-        db.exec('ROLLBACK');
+        await client.query('ROLLBACK');
         throw transactionError;
+      } finally {
+        client.release();
       }
 
       res.json({ success: true, created, updated, skipped, total: created + updated + skipped, errors: errors.slice(0, 50) });
@@ -1329,14 +1694,13 @@ for (const name of Object.keys(networkInterfaces)) {
   });
 
   // Graceful shutdown — Railway sends SIGTERM on every redeploy. Finish
-  // in-flight requests, then close the SQLite handle cleanly so the database
-  // file is never left in a corrupted state.
+  // in-flight requests, then close the PostgreSQL connection pool.
   const shutdown = (signal: string) => {
     console.log(`${signal} received — shutting down gracefully...`);
-    server.close(() => {
+    server.close(async () => {
       try {
-        db.close();
-        console.log('Database closed. Goodbye.');
+        await db.close();
+        console.log('Database pool closed. Goodbye.');
       } catch (closeError) {
         console.error('Error while closing database:', closeError);
       }

@@ -1,9 +1,8 @@
 export type Gender = 'Male' | 'Female' | 'Kids' | 'Unisex';
 export type DayNight = 'Day' | 'Night' | 'Both';
 export type Season = 'Winter' | 'Spring' | 'Summer' | 'Autumn';
-export type Category = 'Perfume' | 'Brand Perfume' | 'Luxury Perfume';
+export type Category = string;
 export type StockStatus = 'In Stock' | 'Low Stock' | 'Out Stock';
-export type SizeUnit = 'ml' | 'g';
 
 export interface Perfume {
   id: string;
@@ -11,17 +10,23 @@ export interface Perfume {
   code: string;
   brand: string;
   price: number;
-  sizeUnit?: SizeUnit;
-  sizePrices?: { amount: number; price: number }[];
+  unit?: 'ml' | 'gram' | null;
+  sizePrice1?: number | null;
+  sizePrice2?: number | null;
+  pricePerGram?: number | null;
+  sizeImage1?: string | null;
+  sizeImage2?: string | null;
   gender: Gender;
   category: Category;
   stockStatus: StockStatus;
+  stockStatus1?: StockStatus | null;
+  stockStatus2?: StockStatus | null;
   description: string;
   rating: number;
   mainImage: string;
   miniImage?: string;
   galleryImages: string[];
-  accords: { name: string; value: number; color: string }[];
+  accords: { name: string; value: number; color: string; customColor?: string }[];
   fragranceProfile: {
     longevity: string;
     projection: string;
@@ -36,15 +41,11 @@ export interface Perfume {
   };
 }
 
-export function getPerfumeSizePrices(perfume: Pick<Perfume, 'sizePrices'>) {
-  const sizePrices = Array.isArray(perfume.sizePrices) ? perfume.sizePrices : [];
-  return sizePrices
-    .filter(option => Number.isFinite(option.amount) && option.amount > 0 && Number.isFinite(option.price) && option.price > 0)
-    .sort((a, b) => a.amount - b.amount);
-}
-
-export function getPerfumeStartingPrice(perfume: Pick<Perfume, 'price' | 'sizePrices'>) {
-  return getPerfumeSizePrices(perfume)[0]?.price ?? perfume.price;
+export function getStockStatusForSize(
+  perfume: Pick<Perfume, 'stockStatus' | 'stockStatus1' | 'stockStatus2'>,
+  size: 1 | 2
+): StockStatus {
+  return (size === 1 ? perfume.stockStatus1 : perfume.stockStatus2) ?? perfume.stockStatus ?? 'In Stock';
 }
 
 export const PERFUME_IMAGES = {

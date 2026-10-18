@@ -1,5 +1,6 @@
 import React from 'react';
 import { Category } from '../../lib/data';
+import { CategorySetting } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { LayoutGrid, Droplet, Gem, Star, Settings, X, Crown, KeyRound } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -8,16 +9,19 @@ import { motion } from 'motion/react';
 interface SidebarProps {
   activeCategory: Category | 'All';
   setActiveCategory: (cat: Category | 'All') => void;
+  categorySettings: CategorySetting[];
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
 }
 
-export default function Sidebar({ activeCategory, setActiveCategory, isOpen, setIsOpen }: SidebarProps) {
-  const categories: { name: Category | 'All'; icon: React.ReactNode }[] = [
-    { name: 'All', icon: <LayoutGrid size={20} /> },
-    { name: 'Perfume', icon: <Droplet size={20} /> },
-    { name: 'Brand Perfume', icon: <Star size={20} /> },
-    { name: 'Luxury Perfume', icon: <Gem size={20} /> },
+export default function Sidebar({ activeCategory, setActiveCategory, categorySettings, isOpen, setIsOpen }: SidebarProps) {
+  const categories: { name: Category | 'All'; label: string; icon: React.ReactNode }[] = [
+    { name: 'All', label: 'All', icon: <LayoutGrid size={20} /> },
+    ...categorySettings.map(({ category }) => ({
+      name: category,
+      label: category,
+      icon: category === 'Luxury Perfume' ? <Gem size={20} /> : category === 'Brand Perfume' ? <Star size={20} /> : <Droplet size={20} />,
+    })),
   ];
 
   const content = (
@@ -67,7 +71,7 @@ export default function Sidebar({ activeCategory, setActiveCategory, isOpen, set
                   : "bg-white text-[#1a2c3d] border border-gray-100"
               )}
             >
-              <span className="flex-1 text-left">{cat.name}</span>
+              <span className="flex-1 text-left">{cat.label}</span>
               <div className="w-10 h-full bg-white/10 -mr-4 flex items-center justify-center border-l border-white/20">
                 {/* Visual block to match mockup tab look */}
               </div>
@@ -112,4 +116,3 @@ export default function Sidebar({ activeCategory, setActiveCategory, isOpen, set
     </>
   );
 }
-
