@@ -1,5 +1,5 @@
 import React from 'react';
-import { Perfume } from '../../lib/data';
+import { getPerfumeSizePrices, getPerfumeStartingPrice, Perfume } from '../../lib/data';
 import { useAccordColors, useCatalogImages, resolveCatalogImage } from '../../lib/api';
 import { motion } from 'motion/react';
 import { Star } from 'lucide-react';
@@ -83,7 +83,8 @@ export const PerfumeCard: React.FC<PerfumeCardProps> = ({ perfume, onClick }) =>
 
           <div className="text-right">
             <span className="text-sm border-b border-gray-300 pb-0.5 text-gray-900 font-bold tracking-wide">
-              {perfume.price.toLocaleString()} ETB
+              {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
+              {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
             </span>
           </div>
         </div>

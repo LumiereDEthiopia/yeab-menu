@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import Sidebar from '../components/layout/Sidebar';
 import TopTabs from '../components/layout/TopTabs';
-import { Category, Gender, Perfume } from '../lib/data';
+import { Category, Gender, getPerfumeSizePrices, getPerfumeStartingPrice, Perfume } from '../lib/data';
 import { usePerfumes, useCatalogImages, resolveCatalogImage } from '../lib/api';
 import PerfumeSlide from '../components/perfume/PerfumeSlide';
 import PerfumeDetailsModal from '../components/perfume/PerfumeDetailsModal';
 import { AnimatePresence, motion } from 'motion/react';
-import { Menu, ChevronLeft, Search, X } from 'lucide-react';
+import { Menu, ChevronLeft, Search, X, TriangleAlert } from 'lucide-react';
 
 export default function CatalogPage() {
-  const { perfumes, loading } = usePerfumes();
+  const { perfumes, loading, dbEmpty } = usePerfumes();
   const { images: catalogImages } = useCatalogImages();
   const [activeCategory, setActiveCategory] = useState<Category | 'All'>('All');
   const [activeGender, setActiveGender] = useState<Gender | 'All'>('All');
@@ -138,6 +138,19 @@ export default function CatalogPage() {
           </div>
         </div>
 
+        {dbEmpty && (
+          <div
+            role="status"
+            className="mb-2 flex flex-shrink-0 items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-900"
+          >
+            <TriangleAlert size={16} className="mt-0.5 flex-shrink-0" />
+            <p className="text-[11px] leading-relaxed">
+              <strong>Your database currently has no saved perfumes.</strong>{' '}
+              If perfumes you added earlier disappeared after a Railway deploy, the deployment has no persistent volume — the database file is wiped on every redeploy. Fix: in Railway, open your service → Volumes → + New Volume, set the mount path to /data, then redeploy. Everything you save afterwards survives future deploys. (Any list you saw right after a deploy was demo data, not database content.)
+            </p>
+          </div>
+        )}
+
         {/* Content Slider Area */}
         <div className="flex-1 relative min-h-0">
           <AnimatePresence initial={false} custom={direction}>
@@ -182,8 +195,16 @@ export default function CatalogPage() {
                           {perfume.name}
                         </h3>
                         <div className="font-bold text-sm sm:text-base text-black mt-auto">
-                          {perfume.price} ETB
+                          {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
+                          {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
                         </div>
+                        {getPerfumeSizePrices(perfume).length > 0 && (
+                          <p className="mt-1 text-[10px] text-gray-500">
+                            {getPerfumeSizePrices(perfume).map(option =>
+                              `${option.amount} ${perfume.sizeUnit ?? 'ml'} · ${option.price.toLocaleString()} ETB`
+                            ).join(' / ')}
+                          </p>
+                        )}
                       </div>
                     </div>
                   ))}

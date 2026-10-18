@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useAdminPerfumes, useAccordColors, useCatalogImages, CatalogImage } from '../lib/api';
-import { Perfume, Gender, Category, DayNight, Season, StockStatus } from '../lib/data';
-import { Plus, Trash, ArrowLeft, Image as ImageIcon, Palette, Edit2, X, Save, Star, FileSpreadsheet, Download, Upload, CircleCheck, TriangleAlert } from 'lucide-react';
+import { getPerfumeSizePrices, getPerfumeStartingPrice, Perfume, Gender, Category, DayNight, Season, SizeUnit, StockStatus } from '../lib/data';
+import { Plus, Trash, ArrowLeft, Image as ImageIcon, Palette, Edit2, X, Save, Star, FileSpreadsheet, Download, Upload, CircleCheck, TriangleAlert, Search } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -33,7 +33,7 @@ export default function AdminPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   
-  const { perfumes, setPerfumes, dbEmpty, loadError, reload: reloadPerfumes } = useAdminPerfumes();
+  const { perfumes, setPerfumes, loading: perfumesLoading, dbEmpty, loadError, reload: reloadPerfumes } = useAdminPerfumes();
   const { colors, setColors } = useAccordColors();
   const { images: catalogImages, setImages: setCatalogImages } = useCatalogImages();
   
@@ -44,6 +44,9 @@ export default function AdminPage() {
   const [editingPerfume, setEditingPerfume] = useState<Partial<Perfume> | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [accordDraft, setAccordDraft] = useState({ name: '', value: 75 });
+  const [productSearch, setProductSearch] = useState('');
+  const [productGender, setProductGender] = useState<Gender | 'All'>('All');
+  const [productCategory, setProductCategory] = useState<Category | 'All'>('All');
 
   // --- Excel import / export state ---
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -60,6 +63,16 @@ export default function AdminPage() {
   const [isUploadingLibraryImages, setIsUploadingLibraryImages] = useState(false);
   const [libraryStatus, setLibraryStatus] = useState<string | null>(null);
   const bucketImages = catalogImages.filter(img => img.gender === libraryGender && img.category === libraryCategory);
+  const filteredProducts = perfumes.filter(perfume => {
+    const query = productSearch.trim().toLowerCase();
+    const matchesSearch = !query ||
+      perfume.name.toLowerCase().includes(query) ||
+      perfume.brand.toLowerCase().includes(query) ||
+      perfume.code.toLowerCase().includes(query);
+    return matchesSearch &&
+      (productGender === 'All' || perfume.gender === productGender) &&
+      (productCategory === 'All' || perfume.category === productCategory);
+  });
 
   const [noteDrafts, setNoteDrafts] = useState<Record<'top' | 'middle' | 'base', { name: string; iconUrl: string }>>({
     top: { name: '', iconUrl: '' },
@@ -71,6 +84,8 @@ export default function AdminPage() {
     name: '',
     brand: '',
     price: 0,
+    sizeUnit: 'ml',
+    sizePrices: [{ amount: 50, price: 0 }, { amount: 100, price: 0 }],
     code: '',
     gender: 'Unisex',
     category: 'Perfume',
@@ -308,8 +323,15 @@ export default function AdminPage() {
   };
 
   const openEditModal = (perfume: Perfume) => {
-    setEditingPerfume({ ...perfume });
+    setEditingPerfume({ ...perfume, sizeUnit: perfume.sizeUnit ?? 'ml', sizePrices: perfume.sizePrices ?? [] });
     setIsModalOpen(true);
+  };
+
+  const updateSizePrice = (index: number, key: 'amount' | 'price', value: number) => {
+    if (!editingPerfume) return;
+    const sizePrices = [...(editingPerfume.sizePrices ?? [])];
+    sizePrices[index] = { ...sizePrices[index], [key]: value };
+    setEditingPerfume({ ...editingPerfume, sizePrices });
   };
 
   const readImageFile = (file: File, onLoad: (image: string) => void) => {
@@ -467,6 +489,11 @@ export default function AdminPage() {
       const isNew = !editingPerfume.id;
       const url = isNew ? '/api/admin/perfumes' : `/api/admin/perfumes/${editingPerfume.id}`;
       const method = isNew ? 'POST' : 'PUT';
+      const savedPerfume = {
+        ...editingPerfume,
+        sizeUnit: editingPerfume.sizeUnit ?? 'ml',
+        sizePrices: (editingPerfume.sizePrices ?? []).filter(option => option.amount > 0 && option.price > 0),
+      };
 
       const res = await fetch(url, {
         method,
@@ -474,7 +501,7 @@ export default function AdminPage() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}` 
         },
-        body: JSON.stringify(editingPerfume)
+        body: JSON.stringify(savedPerfume)
       });
 
       if (res.status === 401) {
@@ -488,7 +515,7 @@ export default function AdminPage() {
           // library — reload so the list shows what was really stored.
           reloadPerfumes();
         } else {
-          setPerfumes(prev => prev.map(p => p.id === editingPerfume.id ? (editingPerfume as Perfume) : p));
+          setPerfumes(prev => prev.map(p => p.id === editingPerfume.id ? (savedPerfume as Perfume) : p));
         }
         setIsModalOpen(false);
         setEditingPerfume(null);
@@ -660,6 +687,105 @@ export default function AdminPage() {
                 </div>
               </div>
             )}
+
+            <section className="bg-white rounded-2xl shadow-sm border border-gray-100 mb-8 p-5 sm:p-6">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+                <div>
+                  <h3 className="text-2xl luxury-text font-bold text-gray-900">Product Catalog</h3>
+                  <p className="text-sm text-gray-500 mt-1">
+                    {perfumesLoading ? 'Loading products…' : `${filteredProducts.length} of ${perfumes.length} products`}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={openAddModal}
+                  className="flex items-center gap-2 bg-black text-white px-5 py-3 rounded-full font-bold text-xs tracking-widest uppercase hover:bg-gray-800 transition-colors"
+                >
+                  <Plus size={15} /> Add Product
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+                <label className="relative sm:col-span-1">
+                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input
+                    type="search"
+                    value={productSearch}
+                    onChange={event => setProductSearch(event.target.value)}
+                    placeholder="Search name, brand, or code"
+                    aria-label="Search products"
+                    className="w-full rounded-xl border border-gray-200 bg-gray-50 py-3 pl-10 pr-3 text-sm outline-none focus:border-gray-400"
+                  />
+                </label>
+                <select
+                  value={productGender}
+                  onChange={event => setProductGender(event.target.value as Gender | 'All')}
+                  aria-label="Filter products by gender"
+                  className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm outline-none focus:border-gray-400"
+                >
+                  <option value="All">All genders</option>
+                  {(['Male', 'Female', 'Unisex', 'Kids'] as Gender[]).map(gender => (
+                    <option key={gender} value={gender}>{gender}</option>
+                  ))}
+                </select>
+                <select
+                  value={productCategory}
+                  onChange={event => setProductCategory(event.target.value as Category | 'All')}
+                  aria-label="Filter products by category"
+                  className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm outline-none focus:border-gray-400"
+                >
+                  <option value="All">All categories</option>
+                  {(['Perfume', 'Brand Perfume', 'Luxury Perfume'] as Category[]).map(category => (
+                    <option key={category} value={category}>{category}</option>
+                  ))}
+                </select>
+              </div>
+
+              {perfumesLoading ? (
+                <p className="py-8 text-center text-sm text-gray-500">Loading products…</p>
+              ) : filteredProducts.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {filteredProducts.map(perfume => (
+                    <article key={perfume.id} className="min-w-0 bg-white p-3 sm:p-4 rounded-2xl border border-gray-100 flex items-center gap-3 sm:gap-4 hover:border-[var(--color-gold)]/60 transition-colors">
+                      <img src={perfume.mainImage} alt="" className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-cover bg-gray-50 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-bold text-gray-900 truncate">{perfume.name}</h4>
+                        <p className="text-xs text-gray-500 truncate">{perfume.brand} · {perfume.code}</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {perfume.gender} · {perfume.category} · {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
+                          {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
+                        </p>
+                        <span className={cn('mt-2 inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest', getStockBadgeClass(perfume.stockStatus))}>
+                          {perfume.stockStatus || 'In Stock'}
+                        </span>
+                      </div>
+                      <div className="flex flex-shrink-0 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openEditModal(perfume)}
+                          className="flex items-center gap-2 rounded-full bg-gray-900 px-3 sm:px-4 py-2.5 text-xs font-bold text-white hover:bg-gray-700 transition-colors"
+                          aria-label={`Edit ${perfume.name}`}
+                        >
+                          <Edit2 size={14} /> <span className="hidden sm:inline">Edit</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(perfume.id)}
+                          className="flex h-10 w-10 items-center justify-center rounded-full bg-red-50 text-red-600 hover:bg-red-100 transition-colors"
+                          aria-label={`Delete ${perfume.name}`}
+                        >
+                          <Trash size={15} />
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="py-8 text-center text-sm text-gray-500">
+                  {perfumes.length === 0 ? 'No saved products yet. Add a product to get started.' : 'No products match these filters.'}
+                </p>
+              )}
+            </section>
 
             {/* Excel Import / Export Section */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 mb-8">
@@ -873,36 +999,6 @@ export default function AdminPage() {
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {perfumes.map(perfume => (
-                <div key={perfume.id} className="bg-white p-4 rounded-[1.5rem] border border-gray-100 shadow-sm flex items-center gap-4 group hover:border-[var(--color-gold)]/50 transition-colors">
-                  <img src={perfume.mainImage} alt={perfume.name} className="w-16 h-16 rounded-xl object-cover bg-gray-50" />
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-bold text-gray-900 truncate">{perfume.name}</h3>
-                    <span className={cn('mb-1 mt-2 inline-flex rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest', getStockBadgeClass(perfume.stockStatus))}>
-                      {perfume.stockStatus || 'In Stock'}
-                    </span>
-                    <p className="text-xs text-gray-500 uppercase tracking-wider">{perfume.brand} • {perfume.price} ETB</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => openEditModal(perfume)}
-                      className="w-10 h-10 rounded-full bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-600 transition-colors"
-                      title="Edit"
-                    >
-                      <Edit2 size={16} />
-                    </button>
-                    <button 
-                      onClick={() => handleDelete(perfume.id)}
-                      className="w-10 h-10 rounded-full bg-red-50 hover:bg-red-100 flex items-center justify-center text-red-600 transition-colors"
-                      title="Delete"
-                    >
-                      <Trash size={16} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </main>
@@ -993,7 +1089,7 @@ export default function AdminPage() {
                     )}
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Price (ETB)</label>
+                        <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Fallback price (ETB)</label>
                         <input 
                           type="number"
                           required
@@ -1001,6 +1097,7 @@ export default function AdminPage() {
                           value={editingPerfume.price}
                           onChange={e => setEditingPerfume({ ...editingPerfume, price: parseInt(e.target.value) || 0 })}
                         />
+                        <p className="mt-1 text-[10px] text-gray-400">Used when no size prices are set.</p>
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Code</label>
@@ -1012,6 +1109,72 @@ export default function AdminPage() {
                           placeholder="P1234"
                         />
                       </div>
+                    </div>
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-gray-600">Size prices</h3>
+                          <p className="mt-1 text-[10px] text-gray-400">Set a different price for each size or weight.</p>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs font-bold text-gray-500">
+                          Unit
+                          <select
+                            value={editingPerfume.sizeUnit ?? 'ml'}
+                            onChange={event => setEditingPerfume({ ...editingPerfume, sizeUnit: event.target.value as SizeUnit })}
+                            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-black"
+                          >
+                            <option value="ml">Milliliters (ml)</option>
+                            <option value="g">Grams (g)</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div className="space-y-2">
+                        {(editingPerfume.sizePrices ?? []).map((option, index) => (
+                          <div key={index} className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
+                            <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                              Size ({editingPerfume.sizeUnit ?? 'ml'})
+                              <input
+                                type="number"
+                                min="1"
+                                value={option.amount}
+                                onChange={event => updateSizePrice(index, 'amount', Number(event.target.value))}
+                                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-black"
+                              />
+                            </label>
+                            <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                              Price (ETB)
+                              <input
+                                type="number"
+                                min="0"
+                                value={option.price}
+                                onChange={event => updateSizePrice(index, 'price', Number(event.target.value))}
+                                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-black"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => setEditingPerfume({
+                                ...editingPerfume,
+                                sizePrices: (editingPerfume.sizePrices ?? []).filter((_, optionIndex) => optionIndex !== index),
+                              })}
+                              className="mb-0.5 flex h-9 w-9 items-center justify-center rounded-lg bg-white text-gray-400 hover:bg-red-50 hover:text-red-600"
+                              aria-label={`Remove size option ${index + 1}`}
+                            >
+                              <Trash size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setEditingPerfume({
+                          ...editingPerfume,
+                          sizePrices: [...(editingPerfume.sizePrices ?? []), { amount: 0, price: 0 }],
+                        })}
+                        className="mt-3 flex items-center gap-1.5 text-xs font-bold text-gray-700 hover:text-black"
+                      >
+                        <Plus size={14} /> Add size
+                      </button>
                     </div>
                   </div>
 

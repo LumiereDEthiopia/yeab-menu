@@ -1,5 +1,5 @@
 import React from 'react';
-import { Perfume } from '../../lib/data';
+import { getPerfumeSizePrices, getPerfumeStartingPrice, Perfume } from '../../lib/data';
 import { useAccordColors, useCatalogImages, resolveCatalogImage } from '../../lib/api';
 import { motion } from 'motion/react';
 import { Star, Hourglass, Wind, Sun, Moon, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -127,7 +127,8 @@ export default function PerfumeSlide({ perfume, onNext, onPrev }: PerfumeSlidePr
                 Price
               </div>
               <div className="px-4 py-2 text-sm font-bold text-black flex items-center justify-center min-w-[100px]">
-                {perfume.price} ETB
+                {getPerfumeSizePrices(perfume).length > 0 ? 'From ' : ''}
+                {getPerfumeStartingPrice(perfume).toLocaleString()} ETB
               </div>
            </div>
            

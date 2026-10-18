@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Perfume } from '../../lib/data';
+import { getPerfumeSizePrices, Perfume } from '../../lib/data';
 import { useAccordColors, useCatalogImages, resolveCatalogImage, isPlaceholderCatalogImage } from '../../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Star, Hourglass, Wind, Sun, Moon, ArrowRight } from 'lucide-react';
@@ -192,9 +192,19 @@ export default function PerfumeDetailsModal({ perfume, onClose }: PerfumeDetails
         rounded-full 
         text-white
       ">
-              <span className="font-bold text-lg tracking-wider">
-                {perfume.price.toLocaleString()} ETB
-              </span>
+              <div className="py-1 text-left">
+                {getPerfumeSizePrices(perfume).length > 0 ? (
+                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                    {getPerfumeSizePrices(perfume).map(option => (
+                      <span key={`${option.amount}-${option.price}`} className="text-xs font-bold tracking-wide">
+                        {option.amount} {perfume.sizeUnit ?? 'ml'} · {option.price.toLocaleString()} ETB
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="font-bold text-lg tracking-wider">{perfume.price.toLocaleString()} ETB</span>
+                )}
+              </div>
 
               <button className="
           w-12 

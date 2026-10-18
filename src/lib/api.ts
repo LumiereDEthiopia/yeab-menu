@@ -1,16 +1,50 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Perfume, MOCK_PERFUMES, Gender, Category } from './data';
 
+function normalizePerfumeSizePrices(perfume: Perfume): Perfume {
+  let value: unknown = perfume.sizePrices;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
+      console.error(`Invalid size-price data for perfume ${perfume.id}:`, error);
+      value = [];
+    }
+  }
+
+  const sizePrices = Array.isArray(value)
+    ? value.filter((option): option is { amount: number; price: number } =>
+      option !== null &&
+      typeof option === 'object' &&
+      Number.isFinite(option.amount) &&
+      Number.isFinite(option.price))
+    : [];
+
+  return {
+    ...perfume,
+    sizeUnit: perfume.sizeUnit === 'g' ? 'g' : 'ml',
+    sizePrices,
+  };
+}
+
 export function usePerfumes() {
   const [perfumes, setPerfumes] = useState<Perfume[]>(MOCK_PERFUMES);
   const [loading, setLoading] = useState(true);
+  const [dbEmpty, setDbEmpty] = useState(false);
 
   useEffect(() => {
     fetch('/api/perfumes')
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`API responded with status ${res.status}`);
+        return res.json() as Promise<Perfume[]>;
+      })
       .then(data => {
-        if (data && data.length > 0) {
-          setPerfumes(data);
+        const savedPerfumes = Array.isArray(data)
+          ? (data as Perfume[]).map(normalizePerfumeSizePrices)
+          : [];
+        setDbEmpty(savedPerfumes.length === 0);
+        if (savedPerfumes.length > 0) {
+          setPerfumes(savedPerfumes);
         } else {
           // Fallback to MOCK_PERFUMES if DB is empty for demo purposes
           setPerfumes(MOCK_PERFUMES);
@@ -18,6 +52,7 @@ export function usePerfumes() {
       })
       .catch(err => {
         console.error('Failed to fetch perfumes:', err);
+        setDbEmpty(false);
         setPerfumes(MOCK_PERFUMES);
       })
       .finally(() => {
@@ -25,7 +60,7 @@ export function usePerfumes() {
       });
   }, []);
 
-  return { perfumes, loading, setPerfumes };
+  return { perfumes, loading, setPerfumes, dbEmpty };
 }
 
 export function useAccordColors() {
@@ -58,7 +93,7 @@ export function useAdminPerfumes() {
         return res.json();
       })
       .then((data: Perfume[]) => {
-        const list = Array.isArray(data) ? data : [];
+        const list = Array.isArray(data) ? data.map(normalizePerfumeSizePrices) : [];
         setPerfumes(list);
         setDbEmpty(list.length === 0);
         setLoadError(false);

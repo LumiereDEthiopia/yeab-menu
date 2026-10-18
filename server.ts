@@ -297,6 +297,8 @@ async function startServer() {
       code TEXT,
       brand TEXT,
       price INTEGER,
+      sizeUnit TEXT DEFAULT 'ml',
+      sizePrices TEXT DEFAULT '[]',
       gender TEXT,
       category TEXT,
       stockStatus TEXT DEFAULT 'In Stock',
@@ -334,6 +336,12 @@ async function startServer() {
   }
   if (!perfumeColumns.some(column => column.name === 'miniImage')) {
     db.exec('ALTER TABLE perfumes ADD COLUMN miniImage TEXT');
+  }
+  if (!perfumeColumns.some(column => column.name === 'sizeUnit')) {
+    db.exec("ALTER TABLE perfumes ADD COLUMN sizeUnit TEXT DEFAULT 'ml'");
+  }
+  if (!perfumeColumns.some(column => column.name === 'sizePrices')) {
+    db.exec("ALTER TABLE perfumes ADD COLUMN sizePrices TEXT DEFAULT '[]'");
   }
 
   // Backfill: ensure every perfume has a stored mini image (defaults to its main image)
@@ -578,6 +586,8 @@ async function startServer() {
       const parsedPerfumes = rows.map(row => ({
         ...row,
         stockStatus: normalizeStockStatus(row.stockStatus),
+        sizeUnit: row.sizeUnit === 'g' ? 'g' : 'ml',
+        sizePrices: JSON.parse(row.sizePrices || '[]'),
         galleryImages: JSON.parse(row.galleryImages || '[]'),
         accords: JSON.parse(row.accords || '[]'),
         fragranceProfile: JSON.parse(row.fragranceProfile || '{}'),
@@ -599,9 +609,9 @@ async function startServer() {
       
       const stmt = db.prepare(`
         INSERT INTO perfumes (
-          id, name, code, brand, price, gender, category, stockStatus, description, rating,
+          id, name, code, brand, price, sizeUnit, sizePrices, gender, category, stockStatus, description, rating,
           mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       
       // New products without their own photo (or still showing a placeholder
@@ -613,7 +623,10 @@ async function startServer() {
       const miniImage = p.miniImage && !isPlaceholderImage(p.miniImage) ? p.miniImage : mainImage;
 
       stmt.run(
-        id, p.name, p.code, p.brand, p.price, p.gender, p.category, normalizeStockStatus(p.stockStatus), p.description, p.rating,
+        id, p.name, p.code, p.brand, p.price,
+        p.sizeUnit === 'g' ? 'g' : 'ml',
+        JSON.stringify(Array.isArray(p.sizePrices) ? p.sizePrices : []),
+        p.gender, p.category, normalizeStockStatus(p.stockStatus), p.description, p.rating,
         mainImage,
         miniImage,
         JSON.stringify(p.galleryImages || []),
@@ -643,12 +656,15 @@ async function startServer() {
       if (!existing) {
         const insertStmt = db.prepare(`
           INSERT INTO perfumes (
-            id, name, code, brand, price, gender, category, stockStatus, description, rating,
+            id, name, code, brand, price, sizeUnit, sizePrices, gender, category, stockStatus, description, rating,
             mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         insertStmt.run(
-          id, p.name, p.code, p.brand, p.price, p.gender, p.category, normalizeStockStatus(p.stockStatus), p.description, p.rating,
+          id, p.name, p.code, p.brand, p.price,
+          p.sizeUnit === 'g' ? 'g' : 'ml',
+          JSON.stringify(Array.isArray(p.sizePrices) ? p.sizePrices : []),
+          p.gender, p.category, normalizeStockStatus(p.stockStatus), p.description, p.rating,
           p.mainImage,
           p.miniImage || p.mainImage || null,
           JSON.stringify(p.galleryImages || []),
@@ -672,6 +688,8 @@ async function startServer() {
         code: b => b.code,
         brand: b => b.brand,
         price: b => b.price,
+        sizeUnit: b => b.sizeUnit === 'g' ? 'g' : 'ml',
+        sizePrices: b => JSON.stringify(Array.isArray(b.sizePrices) ? b.sizePrices : []),
         gender: b => b.gender,
         category: b => b.category,
         stockStatus: b => normalizeStockStatus(b.stockStatus),
@@ -749,6 +767,8 @@ async function startServer() {
     { header: 'code', key: 'code', width: 12 },
     { header: 'brand', key: 'brand', width: 22 },
     { header: 'price', key: 'price', width: 10 },
+    { header: 'sizeUnit', key: 'sizeUnit', width: 12 },
+    { header: 'sizePrices', key: 'sizePrices', width: 30 },
     { header: 'gender', key: 'gender', width: 12 },
     { header: 'category', key: 'category', width: 16 },
     { header: 'stockStatus', key: 'stockStatus', width: 12 },
@@ -819,6 +839,13 @@ async function startServer() {
       code: (p.code as string) ?? '',
       brand: (p.brand as string) ?? '',
       price: typeof p.price === 'number' ? p.price : 0,
+      sizeUnit: p.sizeUnit === 'g' ? 'g' : 'ml',
+      sizePrices: Array.isArray(p.sizePrices)
+        ? (p.sizePrices as { amount?: unknown; price?: unknown }[])
+          .filter(option => typeof option.amount === 'number' && typeof option.price === 'number')
+          .map(option => `${option.amount}:${option.price}`)
+          .join(' | ')
+        : '',
       gender: (p.gender as string) ?? '',
       category: (p.category as string) ?? '',
       stockStatus: normalizeStockStatus(p.stockStatus as string | undefined),
@@ -853,6 +880,8 @@ async function startServer() {
       code: 'P1234',
       brand: 'Our Fragrance',
       price: 2500,
+      sizeUnit: 'ml',
+      sizePrices: '50:1500 | 100:2500',
       gender: 'Unisex',
       category: 'Perfume',
       stockStatus: 'In Stock',
@@ -882,6 +911,8 @@ async function startServer() {
       ['code', 'no', 'Unique product code (e.g. P1234). New rows without a code get one generated automatically.'],
       ['brand', 'no', 'Brand name. New regular perfumes default to "Our Fragrance".'],
       ['price', 'no', 'Whole number in ETB (e.g. 2500). Defaults to 0.'],
+      ['sizeUnit', 'no', 'Size unit for options: ml or g. Defaults to ml.'],
+      ['sizePrices', 'no', 'Size and price pairs separated by " | " in amount:price format, e.g. 50:1500 | 100:2500.'],
       ['gender', 'no', 'Male, Female, Kids or Unisex. Defaults to Unisex (spelling is case-insensitive).'],
       ['category', 'no', 'Perfume, Brand Perfume or Luxury Perfume. Defaults to Perfume.'],
       ['stockStatus', 'no', 'In Stock, Low Stock or Out Stock. Defaults to In Stock.'],
@@ -926,6 +957,7 @@ async function startServer() {
         sheet.addRow(perfumeToExcelRow({
           ...row,
           galleryImages: safeJsonParse<unknown[]>(row.galleryImages as string, []),
+          sizePrices: safeJsonParse<{ amount: number; price: number }[]>(row.sizePrices as string, []),
           accords: safeJsonParse<unknown[]>(row.accords as string, []),
           fragranceProfile: safeJsonParse<Record<string, unknown>>(row.fragranceProfile as string, {}),
           seasons: safeJsonParse<unknown[]>(row.seasons as string, []),
@@ -1033,9 +1065,9 @@ async function startServer() {
 
       const insertStmt = db.prepare(`
         INSERT INTO perfumes (
-          id, name, code, brand, price, gender, category, stockStatus, description, rating,
+          id, name, code, brand, price, sizeUnit, sizePrices, gender, category, stockStatus, description, rating,
           mainImage, miniImage, galleryImages, accords, fragranceProfile, dayNight, seasons, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       let created = 0;
@@ -1072,6 +1104,22 @@ async function startServer() {
               const price = Math.round(Number(priceRaw.replace(/[,\s]/g, '')));
               if (!Number.isFinite(price)) throw new Error(`Price "${priceRaw}" is not a valid number`);
               fields.price = price;
+            }
+            const sizeUnitRaw = cellText(row, 'sizeUnit');
+            if (sizeUnitRaw) fields.sizeUnit = sizeUnitRaw.trim().toLowerCase() === 'g' ? 'g' : 'ml';
+            const sizePricesRaw = cellText(row, 'sizePrices');
+            if (sizePricesRaw) {
+              const sizePrices = splitExcelList(sizePricesRaw).map(pair => {
+                const separator = pair.indexOf(':');
+                if (separator <= 0) throw new Error(`Size price "${pair}" must use amount:price format`);
+                const amount = Number(pair.slice(0, separator).trim());
+                const price = Number(pair.slice(separator + 1).replace(/[,\s]/g, ''));
+                if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(price) || price < 0) {
+                  throw new Error(`Size price "${pair}" must contain a positive size and a valid price`);
+                }
+                return { amount, price };
+              });
+              fields.sizePrices = JSON.stringify(sizePrices);
             }
             const gender = cellText(row, 'gender');
             if (gender) fields.gender = matchExcelEnum(gender, EXCEL_GENDERS, 'Unisex');
@@ -1174,6 +1222,8 @@ async function startServer() {
                 insertedCode,
                 (fields.brand as string) ?? 'Our Fragrance',
                 (fields.price as number) ?? 0,
+                (fields.sizeUnit as string) ?? 'ml',
+                (fields.sizePrices as string) ?? '[]',
                 (fields.gender as string) ?? 'Unisex',
                 (fields.category as string) ?? 'Perfume',
                 (fields.stockStatus as string) ?? 'In Stock',

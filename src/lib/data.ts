@@ -3,6 +3,7 @@ export type DayNight = 'Day' | 'Night' | 'Both';
 export type Season = 'Winter' | 'Spring' | 'Summer' | 'Autumn';
 export type Category = 'Perfume' | 'Brand Perfume' | 'Luxury Perfume';
 export type StockStatus = 'In Stock' | 'Low Stock' | 'Out Stock';
+export type SizeUnit = 'ml' | 'g';
 
 export interface Perfume {
   id: string;
@@ -10,6 +11,8 @@ export interface Perfume {
   code: string;
   brand: string;
   price: number;
+  sizeUnit?: SizeUnit;
+  sizePrices?: { amount: number; price: number }[];
   gender: Gender;
   category: Category;
   stockStatus: StockStatus;
@@ -31,6 +34,17 @@ export interface Perfume {
     middle: { name: string; iconUrl: string }[];
     base: { name: string; iconUrl: string }[];
   };
+}
+
+export function getPerfumeSizePrices(perfume: Pick<Perfume, 'sizePrices'>) {
+  const sizePrices = Array.isArray(perfume.sizePrices) ? perfume.sizePrices : [];
+  return sizePrices
+    .filter(option => Number.isFinite(option.amount) && option.amount > 0 && Number.isFinite(option.price) && option.price > 0)
+    .sort((a, b) => a.amount - b.amount);
+}
+
+export function getPerfumeStartingPrice(perfume: Pick<Perfume, 'price' | 'sizePrices'>) {
+  return getPerfumeSizePrices(perfume)[0]?.price ?? perfume.price;
 }
 
 export const PERFUME_IMAGES = {
