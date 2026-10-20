@@ -49,11 +49,11 @@ source files, Docker build arguments, or committed environment templates.
 
 ## Import an existing SQLite catalog
 
-The one-time importer copies products and related settings/images from the
-existing local SQLite file. It does not modify the source file. The destination
-must be the intended PostgreSQL database, and importing updates rows with
-matching primary keys; take a PostgreSQL backup first if the target already
-contains data.
+The importer copies every product field (including top, middle, and base notes,
+prices, stock, and product images) plus accord colors, category size/price
+settings, and shared catalog images from the existing local SQLite file. It does
+not modify the source file. Importing updates rows with matching primary keys;
+take a PostgreSQL backup first if the target already contains data.
 
 1. Configure `DATABASE_URL` for the destination PostgreSQL database.
 2. Start the app once against that database so the schema is initialized, then
@@ -70,12 +70,28 @@ contains data.
 5. Check the importer row counts and verify the catalog in the app before
    switching production traffic to the new database.
 
+To copy the local catalog specifically to Railway without changing the
+`DATABASE_URL` used by local development:
+
+1. Add `RAILWAY_DATABASE_URL` to your uncommitted local `.env`, using the
+   Railway PostgreSQL service's public connection URL. Do not use the
+   `railway.internal` host from a local machine; use Railway's externally
+   reachable connection URL.
+2. Run:
+
+   ```sh
+   npm run db:copy-to-railway
+   ```
+
+This command requires `RAILWAY_DATABASE_URL` and never falls back to
+`DATABASE_URL`, so it cannot accidentally import into a different configured
+database. Keep the URL private and do not commit `.env`.
+
 The importer uses one transaction for the destination data. A missing
 destination table or an import failure rolls back the import and reports the
 error. Source-side optional tables absent from an older SQLite database are
 skipped and reported; the required `perfumes` table must exist.
-`DATABASE_URL` must point to the intended destination; no hosted database is
-selected automatically.
+No hosted database is selected automatically.
 
 ## Backups and restore
 

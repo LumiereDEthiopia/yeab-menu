@@ -5,8 +5,17 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Pool } from 'pg';
 
-const databaseUrl = process.env.DATABASE_URL?.trim();
-if (!databaseUrl) throw new Error('Set DATABASE_URL to the destination PostgreSQL connection string.');
+const railwayTarget = process.env.DB_MIGRATION_TARGET === 'railway';
+const databaseUrl = railwayTarget
+  ? process.env.RAILWAY_DATABASE_URL?.trim()
+  : process.env.DATABASE_URL?.trim();
+if (!databaseUrl) {
+  throw new Error(
+    railwayTarget
+      ? 'Set RAILWAY_DATABASE_URL to the Railway PostgreSQL connection string.'
+      : 'Set DATABASE_URL to the destination PostgreSQL connection string.'
+  );
+}
 
 const defaultDataDir = process.env.LOCALAPPDATA
   ? path.join(process.env.LOCALAPPDATA, 'LumiereMenu')
@@ -16,6 +25,7 @@ if (!fs.existsSync(sqlitePath)) throw new Error(`SQLite database not found at ${
 
 const sqlite = new DatabaseSync(sqlitePath, { readOnly: true });
 const postgres = new Pool({ connectionString: databaseUrl });
+if (railwayTarget) console.log('Destination: Railway PostgreSQL (RAILWAY_DATABASE_URL).');
 const tables = [
   { name: 'perfumes', keys: ['id'] },
   { name: 'accord_colors', keys: ['name'] },

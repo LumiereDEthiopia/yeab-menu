@@ -17,7 +17,8 @@
     "seed": "tsx scripts/seed-female-unisex-luxury.mts",
     "seed:male": "tsx scripts/seed-male-full.mjs",
     "db:backup": "tsx scripts/backup-db.mts",
-    "db:migrate-sqlite": "tsx scripts/migrate-sqlite-to-postgres.mts"
+    "db:migrate-sqlite": "tsx scripts/migrate-sqlite-to-postgres.mts",
+    "db:copy-to-railway": "cross-env DB_MIGRATION_TARGET=railway tsx scripts/migrate-sqlite-to-postgres.mts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
